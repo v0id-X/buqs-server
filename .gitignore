@@ -19,9 +19,6 @@ node_modules/
 .env.test
 .env.production
 
-# Docker
-.docker
-docker-compose.override.yml
 
 # Editor directories and files
 .vscode/
