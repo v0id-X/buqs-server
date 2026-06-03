@@ -62,7 +62,7 @@ const startServer = async () => {
 
         initializeBackgroundWorkers();
 
-        app.listen(PORT, () => {
+        app.listen(PORT || 3000,"0.0.0.0", () => {
             console.log(`[Server] Listening on PORT: ${PORT}`);
             console.log(`[Server] Health Check: http://localhost:${PORT}/health`);
         });
