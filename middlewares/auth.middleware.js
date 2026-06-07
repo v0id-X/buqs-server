@@ -11,11 +11,11 @@ export const protectRoute = async(req,res,next)=>{
 
             req.user = decoded;
 
-            next();
         } catch (error) {
             console.log(`middleware catchblock error: ${error}`);
             return res.status(401).json({success:false,message:"Not authorized, token failed"});
         }
+        next();
     }
 
     if(!token){
