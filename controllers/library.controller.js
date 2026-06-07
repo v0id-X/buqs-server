@@ -27,7 +27,7 @@ export const updateLibraryStatus = async (req, res) => {
             libraryItem: result.rows[0] 
         });
     } catch (error) {
-        console.error('Error updating library:', error);
+        console.error(error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 }
@@ -46,7 +46,7 @@ export const getBookStatus = async (req, res) => {
             status: result.rows.length > 0 ? result.rows[0].status : null 
         });
     } catch (error) {
-        console.error('Error fetching book status:', error);
+        console.error(error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 };
@@ -104,7 +104,7 @@ export const getUserLibrary = async (req, res) => {
             nextCursor
         });
     } catch (error) {
-        console.error('Error fetching library:', error);
+        console.error(error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 };
@@ -131,7 +131,7 @@ export const removeFromLibrary = async (req, res) => {
             message: 'Book removed from library successfully.' 
         });
     } catch (error) {
-        console.error('Error removing book from library:', error);
+        console.error(error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 };

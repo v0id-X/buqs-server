@@ -3,7 +3,8 @@ import { Queue } from "bullmq";
 import { redisConnection } from "../utils/redisConnection.js";
 
 const analyticsQueue = new Queue('analytics-queue',{
-    connection: redisConnection
+    connection: redisConnection,
+    prefix:'{analytics}'
 });
 
 export const trackEvent = async(userId,eventType,eventData={}) =>{

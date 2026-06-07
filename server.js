@@ -14,10 +14,8 @@ import libraryRoutes from './routes/library.routes.js';
 
 
 import './workers/analytics.worker.js';
-import { startCronJobs } from './workers/statsAggregator.js';
-import { startAffinityCronJobs } from './workers/affinityAggregator.js';
-import { startSearchAggregator, runSearchAggregation } from './workers/searchAggregator.js';
-import { refreshSearchCache } from './utils/searchCache.js';
+import { startStatsCron } from './workers/statsAggregator.js';
+import { startAffinityCron } from './workers/affinityAggregator.js';
 import { startSimilarityCron } from './workers/similarityAggregator.js';
 
 
@@ -25,8 +23,13 @@ EventEmitter.defaultMaxListeners = 20;
 const app = express();
 const PORT = process.env.PORT || 8000;
 
+app.set('trust proxy',1);
+app.use(cors({
+    origin:
+        process.env.FRONTEND_URL,
+        credentials:true
+}));
 
-app.use(cors());
 app.use(express.json());
 
 
@@ -44,9 +47,8 @@ app.use('/api/library', libraryRoutes);
 
 const initializeBackgroundWorkers = () => {
     console.log('[System] Starting scheduled cron jobs...');
-    startCronJobs();
-    startAffinityCronJobs();
-    startSearchAggregator();
+    startStatsCron();
+    startAffinityCron();
     startSimilarityCron();
 };
 
@@ -55,11 +57,6 @@ const startServer = async () => {
 
         await pool.connect();
         console.log('[Database] Connected to PostgreSQL successfully.');
-
-        console.log('[Cache] Building initial search dictionary...');
-        await runSearchAggregation();
-        await refreshSearchCache();
-
         initializeBackgroundWorkers();
 
         app.listen(PORT || 8000, () => {

@@ -1,3 +1,4 @@
+
 import pool from "../db/db.js";
 
 export const createNote = async (req, res) => {
@@ -12,7 +13,7 @@ export const createNote = async (req, res) => {
 
         return res.status(201).json(newNote.rows[0]);
     } catch (error) {
-        console.error(`Error creating note`, error);
+        console.error(error);
         res.status(500).json({ message: 'Internal server error' });
     }
 }
@@ -20,38 +21,42 @@ export const createNote = async (req, res) => {
 export const getNotes = async (req, res) => {
     try {
         const userId = req.user.id;
-        const { cursor, limit = 15, search } = req.query;
+        const { cursorDate, cursorId, limit = 15, search } = req.query;
 
         let query = `SELECT * FROM notes WHERE user_id = $1`;
         const values = [userId];
         let paramIndex = 2;
 
         if (search) {
-            // Leverages the GIN Trigram index instantly
             query += ` AND (title || ' ' || content) ILIKE $${paramIndex++}`;
             values.push(`%${search}%`);
         }
 
-        if (cursor) {
-            query += ` AND updated_at < $${paramIndex++}`;
-            values.push(cursor);
+        if (cursorDate && cursorId) {
+            query += ` AND (updated_at, id) < ($${paramIndex++}, $${paramIndex++})`;
+            values.push(cursorDate, cursorId);
         }
 
-        query += ` ORDER BY updated_at DESC LIMIT $${paramIndex}`;
+        query += ` ORDER BY updated_at DESC, id DESC LIMIT $${paramIndex}`;
         values.push(parseInt(limit, 10));
 
         const notes = await pool.query(query, values);
 
-        const nextCursor = notes.rows.length === parseInt(limit, 10) 
-            ? notes.rows[notes.rows.length - 1].updated_at 
-            : null;
+        let nextCursor = null;
+        if (notes.rows.length === parseInt(limit, 10)) {
+            const lastItem = notes.rows[notes.rows.length - 1];
+            nextCursor = {
+                cursorDate: lastItem.updated_at,
+                cursorId: lastItem.id
+            };
+        }
 
         return res.status(200).json({
             data: notes.rows,
             nextCursor
         });
     } catch (error) {
-        console.error('Error getting notes', error);
+        console.error(error);
         return res.status(500).json({ message: 'Internal server error' });
     }
 }
@@ -69,7 +74,7 @@ export const getNoteById = async (req, res) => {
         if (note.rows.length === 0) return res.status(404).json({ message: 'Note not found' });
         return res.status(200).json(note.rows[0]);
     } catch (error) {
-        console.error('Error getting note', error);
+        console.error(error);
         return res.status(500).json({ message: 'Internal server error' });
     }
 }
@@ -92,7 +97,7 @@ export const updateNotes = async (req, res) => {
 
         return res.status(200).json(updatedNote.rows[0]);
     } catch (error) {
-        console.error("Error updating note", error);
+        console.error(error);
         return res.status(500).json({ message: 'Internal server error' });
     }
 }
@@ -113,7 +118,7 @@ export const deleteNote = async (req, res) => {
 
         return res.status(200).json({ message: 'Note deleted successfully', id });
     } catch (error) {
-        console.error('Error deleting note:', error);
+        console.error(error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 }

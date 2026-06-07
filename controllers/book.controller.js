@@ -1,8 +1,8 @@
+
 import pool from '../db/db.js';
 import { trackEvent } from '../queues/analytics.queue.js';
 import { redisConnection } from '../utils/redisConnection.js';
 import { getCohortBucket, seededRandom } from '../utils/random.js';
-import { allFuseIndex, safeFuseIndex } from '../utils/searchCache.js'; 
 import crypto from 'crypto';
 
 const CANDIDATE_POOL_SIZE = 300;
@@ -29,18 +29,16 @@ export const getBooks = async (req, res) => {
 const getDiscoveryFeed = async (req, res, requestId) => {
     const userId = req?.user?.id;
     const limit = parseInt(req.query.limit) || 20;
-    const { genre, shuffle, safe_mode } = req.query;
+    const { genre, safe_mode } = req.query;
     const offset = parseInt(req.query.offset) || 0;
     const poolStartVal = req.query.poolStartVal || null;
     const poolStartIsbn = req.query.poolStartIsbn || null;
     
     const isSafeMode = safe_mode === 'true';
 
-    console.log(`[Feed:${requestId}] Discovery Feed | User=${userId} | Limit=${limit} | Offset=${offset} | Genre=${genre || 'all'} | Shuffle=${shuffle || false} | Safe=${isSafeMode}`);
+    console.log(`[Feed:${requestId}] Discovery Feed | Limit=${limit} | Offset=${offset} | Genre=${genre || 'all'} | Safe=${isSafeMode}`);
 
-    const bucketId = shuffle === 'true' 
-        ? Math.floor(Math.random() * 100000).toString() 
-        : getCohortBucket(userId, 20).toString();
+    const bucketId = getCohortBucket(userId, 20).toString();
 
     const cacheKey = `books:pool:bucket_${bucketId}:${genre || 'all'}:${poolStartIsbn || 'top'}:safe:${isSafeMode}`;
 
@@ -48,14 +46,12 @@ const getDiscoveryFeed = async (req, res, requestId) => {
     let nextPoolStartVal = null;
     let nextPoolStartIsbn = null;
 
-    if (shuffle !== 'true') {
-        const cachedPool = await redisConnection.get(cacheKey);
-        if (cachedPool) {
-            const parsed = JSON.parse(cachedPool);
-            masterPool = parsed.pool;
-            nextPoolStartVal = parsed.nextPoolStartVal;
-            nextPoolStartIsbn = parsed.nextPoolStartIsbn;
-        }
+    const cachedPool = await redisConnection.get(cacheKey);
+    if (cachedPool) {
+        const parsed = JSON.parse(cachedPool);
+        masterPool = parsed.pool;
+        nextPoolStartVal = parsed.nextPoolStartVal;
+        nextPoolStartIsbn = parsed.nextPoolStartIsbn;
     }
 
     if (masterPool.length === 0) {
@@ -100,19 +96,17 @@ const getDiscoveryFeed = async (req, res, requestId) => {
             nextPoolStartIsbn = lastDbBook.isbn;
 
             masterPool = dbResult.rows.map(book => {
-                const entropy = seededRandom(bucketId, book.isbn) * 0.10;
-                return { ...book, final_score: Number(book.base_feed_score) + entropy };
+                const wobbleMultiplier = 1 + ((Math.random() * 0.30) - 0.15);
+                return { ...book, final_score: Number(book.base_feed_score) * wobbleMultiplier };
             });
 
             masterPool.sort((a, b) => b.final_score - a.final_score);
 
-            if (shuffle !== 'true') {
-                await redisConnection.set(cacheKey, JSON.stringify({
-                    pool: masterPool,
-                    nextPoolStartVal,
-                    nextPoolStartIsbn
-                }), 'EX', 180);
-            }
+            await redisConnection.set(cacheKey, JSON.stringify({
+                pool: masterPool,
+                nextPoolStartVal,
+                nextPoolStartIsbn
+            }), 'EX', 1800); 
         }
     }
 
@@ -136,8 +130,8 @@ const getDiscoveryFeed = async (req, res, requestId) => {
         hasMore = false;
     }
 
-    if (genre || shuffle === 'true') {
-        trackEvent(userId, 'feed_filter_used', { genre, sort: 'discovery', shuffle }).catch(console.error);
+    if (genre) {
+        trackEvent(userId, 'feed_filter_used', { genre, sort: 'discovery' }).catch(console.error);
     }
 
     console.timeEnd(`[Feed:${requestId}] total`);
@@ -203,14 +197,6 @@ const getStandardFeed = async (req, res) => {
     baseQuery += ` LIMIT $${vIdx}`;
     values.push(limit);
 
-    let countQuery = `SELECT COUNT(*) FROM books`;
-    const countConds = [];
-    const countVals = [];
-    if (isSafeMode) countConds.push(`is_adult = false`);
-    if (genre) { countConds.push(`genres && $1::text[]`); countVals.push(values[0]); }
-    if (countConds.length > 0) countQuery += ` WHERE ` + countConds.join(' AND ');
-
-    const countResult = await pool.query(countQuery, countVals);
     const result = await pool.query(baseQuery, values);
     const books = result.rows;
 
@@ -229,7 +215,7 @@ const getStandardFeed = async (req, res) => {
     }
 
     return res.status(200).json({ 
-        books, nextCursor, hasMore, totalBooks: parseInt(countResult.rows[0].count) 
+        books, nextCursor, hasMore, totalBooks: null 
     });
 };
 
@@ -308,7 +294,6 @@ export const getForYouFeed = async (req, res) => {
             nextPoolStartIsbn = lastDbBook.isbn;
 
             const currentYear = new Date().getFullYear();
-            const dateSeed = new Date().toISOString().split('T')[0];
 
             masterPool = dbResult.rows.map(book => {
                 let genreMatchScore = 0;
@@ -320,14 +305,19 @@ export const getForYouFeed = async (req, res) => {
                 const pScore = (genreMatchScore * 0.7) + (authorMatchScore * 0.3);
                 const age = Math.max(0, currentYear - (book.published_year || currentYear));
                 const freshnessScore = Math.exp(-0.138 * age); 
-                const entropy = seededRandom(`${userId}-${dateSeed}`, book.isbn) * 0.10; 
+                
+                const raw_score = (pScore * 0.50) + (Number(book.base_feed_score) * 0.40) + (freshnessScore * 0.10);
+                
+                const wobbleMultiplier = 1 + ((Math.random() * 0.30) - 0.15); 
 
-                const final_score = (pScore * 0.50) + (Number(book.base_feed_score) * 0.40) + (freshnessScore * 0.10) + entropy;
+                const final_score = raw_score * wobbleMultiplier;
+                
                 return { ...book, final_score };
             });
 
             masterPool.sort((a, b) => b.final_score - a.final_score);
-            await redisConnection.set(cacheKey, JSON.stringify({ pool: masterPool, nextPoolStartVal, nextPoolStartIsbn }), 'EX', 300);
+            
+            await redisConnection.set(cacheKey, JSON.stringify({ pool: masterPool, nextPoolStartVal, nextPoolStartIsbn }), 'EX', 1800); 
         }
     }
 
@@ -381,12 +371,12 @@ export const getTrendingBooks = async (req, res) => {
         const trendingResult = await pool.query(query);
 
         if (trendingResult.rows.length > 0) {
-            await redisConnection.set(cacheKey, JSON.stringify(trendingResult.rows), 'EX', 300);
+            await redisConnection.set(cacheKey, JSON.stringify(trendingResult.rows), 'EX', 1800);
         }
 
         return res.status(200).json({ success: true, books: trendingResult.rows.slice(0, limit) });
     } catch (error) {
-        console.error("[Trending] Error:", error);
+        console.error(error);
         return res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -396,63 +386,94 @@ export const autoCompleteBooks = async (req, res) => {
         const { query, safe_mode } = req.query;
         if (!query || query.length < 2) return res.status(200).json([]);
         
-        const searchTerm = query.toLowerCase().trim();
+        const searchTerm = query.trim();
+        const isSafeMode = safe_mode === 'true';
+
+        let sql = `
+            WITH FastMatches AS (
+                SELECT isbn, title, author, cover_image, published_year, genres, genres_text
+                FROM books 
+                WHERE title ILIKE $2 
+                   OR author ILIKE $2
+                   OR title % $1 
+                   OR author % $1
+                   OR genres_text % $1
+                ${isSafeMode ? 'AND is_adult = false' : ''}
+                LIMIT 100
+            )
+            SELECT isbn, title, author, cover_image, published_year, genres 
+            FROM FastMatches
+            ORDER BY GREATEST(
+                similarity(title, $1), 
+                similarity(author, $1),
+                similarity(genres_text, $1)
+            ) DESC 
+            LIMIT 12;
+        `;
         
-        const activeIndex = safe_mode === 'true' ? safeFuseIndex : allFuseIndex;
+        let values = [searchTerm, `${searchTerm}%`];
 
-        if (!activeIndex) return res.status(200).json([]);
-
-        const results = activeIndex.search(searchTerm, { limit: 12 });
-        return res.status(200).json(results.map(result => result.item));
+        const result = await pool.query(sql, values);
+        return res.status(200).json(result.rows);
     } catch (error) {
+        console.error('[Autocomplete] Error:', error);
         return res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
 export const searchBooks = async (req, res) => {
     try {
-        const { query, cursorYear, cursorIsbn, limit = 20, safe_mode } = req.query;
-        if (!query) return res.status(400).json({ success: false, message: 'Search query required' });
+        const { query, offset = 0, limit = 20, safe_mode } = req.query;
         
-        const searchTerm = query.toLowerCase().trim();
+        if (!query || query.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Search query required' });
+        }
+        
+        const searchTerm = query.trim();
         const isSafeMode = safe_mode === 'true';
+        const parsedLimit = parseInt(limit, 10);
+        const parsedOffset = parseInt(offset, 10);
 
-        let sql = `
-            SELECT isbn, title, author, cover_image, published_year, genres 
-            FROM books 
-            WHERE (search_text % $1 OR search_text ILIKE $2)
+        const sql = `
+            SELECT 
+                isbn, title, author, cover_image, published_year, genres,
+                (
+                    ts_rank(search_vector, websearch_to_tsquery('english', $1)) + 
+                    GREATEST(
+                        similarity(title, $1), 
+                        similarity(author, $1), 
+                        similarity(genres_text, $1)
+                    )
+                ) AS relevance_score
+            FROM books
+            WHERE (
+                search_vector @@ websearch_to_tsquery('english', $1) 
+                OR title % $1 
+                OR author % $1 
+                OR genres_text % $1
+            )
+            ${isSafeMode ? 'AND is_adult = false' : ''}
+            ORDER BY relevance_score DESC
+            LIMIT $2 OFFSET $3;
         `;
-        let values = [searchTerm, `%${searchTerm}%`];
-        let valIdx = 3;
-
-        if (isSafeMode) {
-            sql += ` AND is_adult = false`;
-        }
-
-        if (cursorYear && cursorIsbn) {
-            sql += ` AND (published_year, isbn) < ($${valIdx}, $${valIdx+1})`;
-            values.push(cursorYear, cursorIsbn);
-            valIdx += 2;
-        }
-
-        sql += ` ORDER BY published_year DESC, isbn DESC LIMIT $${valIdx}`;
-        values.push(parseInt(limit, 10));
+        
+        const values = [searchTerm, parsedLimit, parsedOffset];
 
         const result = await pool.query(sql, values);
         const books = result.rows;
 
         let nextCursor = null;
-        if (books.length === parseInt(limit, 10)) {
-            const lastBook = books[books.length - 1];
-            nextCursor = { cursorYear: lastBook.published_year, cursorIsbn: lastBook.isbn };
+        if (books.length === parsedLimit) {
+            nextCursor = { offset: parsedOffset + parsedLimit };
         }
 
-        if (books.length > 0 && req.user) {
-            trackEvent(req.user.id, 'search', { query }).catch(console.error);
+        if (books.length > 0 && req?.user) {
+            trackEvent(req.user.id, 'search', { query: searchTerm }).catch(console.error);
         }
 
         return res.status(200).json({ books, nextCursor });
     } catch (error) {
+        console.error('[Search] Error:', error);
         return res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -460,8 +481,18 @@ export const searchBooks = async (req, res) => {
 export const getBookByIsbn = async(req,res)=>{
     try {
         const {isbn} = req.params;
-        const cleanIsbn = isbn.replace(/-/g, '');
-        const sql = "SELECT b.*, COALESCE(ROUND(AVG(r.rating), 2), 0) AS average_rating, COUNT(r.id) AS total_reviews FROM books b LEFT JOIN ratings r ON b.isbn = r.isbn WHERE REPLACE(b.isbn, '-', '') = $1 GROUP BY b.isbn";
+        const cleanIsbn = isbn.replace(/-/g, ''); 
+        
+        const sql = `
+            SELECT 
+                b.*, 
+                COALESCE(ROUND(AVG(r.rating), 2), 0) AS average_rating, 
+                COUNT(r.id) AS total_reviews 
+            FROM books b 
+            LEFT JOIN ratings r ON b.isbn = r.isbn 
+            WHERE b.isbn = $1 
+            GROUP BY b.isbn
+        `;
         const result = await pool.query(sql, [cleanIsbn]);
 
         if(result.rows.length === 0) return res.status(404).json({success:false,message:'Book not found'});
@@ -469,10 +500,10 @@ export const getBookByIsbn = async(req,res)=>{
         if (req.user) trackEvent(req.user.id, 'book_view', {isbn: cleanIsbn}).catch(console.error);
         return res.status(200).json(result.rows[0]);
     } catch (error) {
+        console.error('[GetBook] Error:', error);
         return res.status(500).json({success:false,message:'Internal server error'});
     }
 }
-
 
 export const getSimilarBooks = async (req, res) => {
     const { isbn } = req.params;
@@ -546,11 +577,7 @@ export const getSimilarBooks = async (req, res) => {
             books: matchesPool.slice(0, limit)
         });
     } catch (error) {
-        console.error(
-            '[Books] Failed to fetch similar books:',
-            error
-        );
-
+        console.error(error);
         return res.status(500).json({
             success: false,
             message: 'Failed to fetch similar books'

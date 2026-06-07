@@ -10,7 +10,7 @@ const worker = new Worker('analytics-queue', async (job) =>{
 
     try{
 
-        const dbUserId = userId === 'anonymous' ? null :userId;
+        const dbUserId = userId ;
 
         const isbn = eventData.isbn || null;
         await pool.query(
@@ -56,7 +56,8 @@ const worker = new Worker('analytics-queue', async (job) =>{
 
 }, {
     connection: redisConnection,
-    concurrency: 5
+    concurrency: 5,
+    prefix: '{analytics}'
 });
 
 export default worker;

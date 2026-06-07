@@ -1,3 +1,4 @@
+
 import cron from 'node-cron';
 import pool from '../db/db.js';
 
@@ -119,10 +120,11 @@ export const startSimilarityCron = () => {
 
                 const top50 = matches.slice(0, 50);
 
-                const batchInsertValues = top50.map(
-                    (match) =>
-                        `('${targetBook.isbn}', '${match.isbn}', ${match.score}, NOW())`
-                );
+                const batchInsertValues = [];
+                top50.forEach((match) => {
+                    batchInsertValues.push(`('${targetBook.isbn}', '${match.isbn}', ${match.score}, NOW())`);
+                    batchInsertValues.push(`('${match.isbn}', '${targetBook.isbn}', ${match.score}, NOW())`);
+                });
 
                 if (batchInsertValues.length) {
                     await pool.query(
@@ -138,6 +140,10 @@ export const startSimilarityCron = () => {
                             created_at
                         )
                         VALUES ${batchInsertValues.join(',')}
+                        ON CONFLICT (isbn, similar_isbn) DO UPDATE 
+                        SET 
+                            similarity_score = EXCLUDED.similarity_score,
+                            created_at = NOW()
                     `);
 
                     totalInserts += batchInsertValues.length;

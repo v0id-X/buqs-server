@@ -4,17 +4,18 @@ import{
     getSimilarBooks
 } from '../controllers/book.controller.js'
 import {protectRoute} from '../middlewares/auth.middleware.js';
+import { apiLimiter,searchLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
 
 router.use(protectRoute);
 
-router.get('/',getBooks);
-router.get('/search',searchBooks);
-router.get('/autocomplete',autoCompleteBooks);
-router.get('/for-you',getForYouFeed);
-router.get('/trending',getTrendingBooks); 
-router.get('/:isbn/similar',getSimilarBooks);
-router.get('/:isbn',getBookByIsbn);
+router.get('/',apiLimiter,getBooks);
+router.get('/search',searchLimiter,searchBooks);
+router.get('/autocomplete',searchLimiter,autoCompleteBooks);
+router.get('/for-you',searchLimiter,getForYouFeed);
+router.get('/trending',apiLimiter,getTrendingBooks); 
+router.get('/:isbn/similar',apiLimiter,getSimilarBooks);
+router.get('/:isbn',apiLimiter,getBookByIsbn);
 
 export default router;

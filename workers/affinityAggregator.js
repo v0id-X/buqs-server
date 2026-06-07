@@ -1,10 +1,11 @@
+
 import cron from 'node-cron';
 import pool from '../db/db.js';
 
-export const startAffinityCronJobs = () => {
+export const startAffinityCron = () => {
     console.log(`[UserAffinity-Cron] Initialized.`);
 
-    cron.schedule('*/5 * * * *', async () => {
+    cron.schedule('*/30 * * * *', async () => {
         const startTime = Date.now();
         
         console.log(`[UserAffinity-Cron] Started User Affinity Aggregation at ${new Date().toLocaleString()}`);
@@ -37,7 +38,7 @@ export const startAffinityCronJobs = () => {
                             ELSE 0.1
                         END as weight_delta
                     FROM analytics_events ae
-                    WHERE ae.created_at >= NOW() - INTERVAL '5 minutes'
+                    WHERE ae.created_at >= NOW() - INTERVAL '30 minutes'
                       AND ae.user_id IS NOT NULL
                 ),
                 VectorMapping AS (
@@ -49,6 +50,7 @@ export const startAffinityCronJobs = () => {
                     FROM RecentEvents re
                     JOIN books b ON re.isbn = b.isbn
                     CROSS JOIN LATERAL unnest(b.genres) AS g(genre) 
+                    WHERE b.author IS NOT NULL 
                 ),
                 AggregatedDeltas AS (
                     SELECT 
