@@ -12,25 +12,21 @@ export const submitRating = async (req, res) => {
             });
         }
 
-        const existingCheck = await pool.query(
-            'SELECT id FROM ratings WHERE user_id = $1 AND isbn = $2',
-            [userId, isbn]
-        );
-
-        if (existingCheck.rows.length > 0) {
-            return res.status(403).json({
-                error: 'You have already rated this book. Ratings are final.'
-            });
-        }
-
         const result = await pool.query(
             `
             INSERT INTO ratings (user_id, isbn, rating)
             VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, isbn) DO NOTHING
             RETURNING *;
             `,
             [userId, isbn, rating]
         );
+
+        if (result.rows.length === 0) {
+            return res.status(403).json({
+                error: 'You have already rated this book. Ratings are final.'
+            });
+        }
 
         trackEvent(userId,'submit_rating',{isbn,rating}).catch(console.error);
 

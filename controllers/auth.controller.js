@@ -12,21 +12,18 @@ export const register = async (req,res)=>{
     try {
 
         const {email,password,name} = req.body;
-        
 
-    const userExists = await pool.query(`SELECT * FROM USERS WHERE email = $1`,[email]);
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password,salt);
 
-    if(userExists.rows.length>0){
-        return res.status(400).json({success:false,message:"User with this email already exits!"});
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password,salt);
-
-    const newUser = await pool.query(`INSERT INTO USERS(email,password_hash,name) VALUES($1,$2,$3) RETURNING id, name, email`,[email,hashedPassword,name]);
-
-    if(!newUser){
-        return res.status(500).json({success:false,message:"Failed to create user."});
+    let newUser;
+    try {
+        newUser = await pool.query(`INSERT INTO USERS(email,password_hash,name) VALUES($1,$2,$3) RETURNING id, name, email`,[email,hashedPassword,name]);
+    } catch (dbError) {
+        if (dbError.code === '23505') { 
+            return res.status(400).json({success:false,message:"User with this email already exits!"});
+        }
+        throw dbError;
     }
 
     const user = newUser.rows[0];
@@ -167,9 +164,10 @@ export const forgotPassword = async(req,res)=>{
             }
 
             const resetToken = crypto.randomBytes(20).toString('hex');
+            const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
             const expireDate = new Date(Date.now()+3600000);
 
-            await pool.query(`UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE email = $3`,[resetToken,expireDate,email]);
+            await pool.query(`UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE email = $3`,[hashedToken,expireDate,email]);
 
             const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
 
@@ -202,7 +200,10 @@ export const forgotPassword = async(req,res)=>{
         const {password: newPassword} = req.body;
 
         try {
-            const userExists = await pool.query(`SELECT * FROM users WHERE reset_password_token = $1 AND reset_password_expires > NOW()`,[resetToken]);
+    
+            const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+            const userExists = await pool.query(`SELECT * FROM users WHERE reset_password_token = $1 AND reset_password_expires > NOW()`,[hashedToken]);
 
             if(userExists.rows.length === 0){
                 return res.status(400).json({success:false,message:"Password link has expired/Invalid token"});
@@ -215,8 +216,9 @@ export const forgotPassword = async(req,res)=>{
 
             await pool.query(`UPDATE users SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL WHERE id = $2`,[passwordHash,user.id]);
 
-            res.status(200).json({success:true,message:"Password Updated Succesfully. Login with your new password."});
+            return res.status(200).json({success:true,message:"Password Updated Succesfully. Login with your new password."});
         } catch (error) {
-            
+            console.error(`reset password catch block error: ${error}`);
+            return res.status(500).json({success:false,message:"Internal server error, unable to reset password."});
         }
     }

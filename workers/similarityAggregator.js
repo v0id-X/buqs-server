@@ -120,33 +120,42 @@ export const startSimilarityCron = () => {
 
                 const top50 = matches.slice(0, 50);
 
-                const batchInsertValues = [];
+                const insertRows = [];
                 top50.forEach((match) => {
-                    batchInsertValues.push(`('${targetBook.isbn}', '${match.isbn}', ${match.score}, NOW())`);
-                    batchInsertValues.push(`('${match.isbn}', '${targetBook.isbn}', ${match.score}, NOW())`);
+                    insertRows.push([targetBook.isbn, match.isbn, match.score]);
+                    insertRows.push([match.isbn, targetBook.isbn, match.score]);
                 });
 
-                if (batchInsertValues.length) {
+                if (insertRows.length) {
                     await pool.query(
                         `DELETE FROM book_similarities WHERE isbn = $1`,
                         [targetBook.isbn]
                     );
 
-                    await pool.query(`
-                        INSERT INTO book_similarities (
+                    const placeholders = [];
+                    const params = [];
+                    insertRows.forEach((row, idx) => {
+                        const base = idx * 3;
+                        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, NOW())`);
+                        params.push(row[0], row[1], row[2]);
+                    });
+
+                    await pool.query(
+                        `INSERT INTO book_similarities (
                             isbn,
                             similar_isbn,
                             similarity_score,
                             created_at
                         )
-                        VALUES ${batchInsertValues.join(',')}
+                        VALUES ${placeholders.join(',')}
                         ON CONFLICT (isbn, similar_isbn) DO UPDATE 
                         SET 
                             similarity_score = EXCLUDED.similarity_score,
-                            created_at = NOW()
-                    `);
+                            created_at = NOW()`,
+                        params
+                    );
 
-                    totalInserts += batchInsertValues.length;
+                    totalInserts += insertRows.length;
                 }
             }
 
