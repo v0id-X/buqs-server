@@ -1,238 +1,367 @@
-# buqs-server
+# BUQS Server
 
-The backend powering **Buqs** — a personalized book discovery platform. This is a Node.js/Express REST API that goes well beyond basic CRUD: it runs a multi-mode recommendation feed, a nightly cosine-similarity engine for "books like this," an async analytics pipeline, and a set of scheduled aggregation jobs that keep every score fresh without ever blocking a user's request.
+The backend for **BUQS**, a personalized book discovery platform. It is a Node.js and Express REST API built around one operating principle: expensive work belongs off the request path. Recommendation candidates, trend scores, taste profiles, analytics, and book-to-book similarity are computed asynchronously, then served quickly through PostgreSQL and Redis.
 
-The system was built around one constraint: **never make the user wait on a background computation.** Recommendations, trending scores, and taste profiles are all pre-computed by cron workers and served from Redis — the request path itself stays fast and simple.
+## BUQS Librarian demo
 
----
+<video src="./Buqs-Librarian-Demo.mp4" controls muted playsinline width="100%"></video>
 
-## What's inside
+[Watch or download the BUQS Librarian demo](./Buqs-Librarian-Demo.mp4)
 
-- Four-mode book feed: cohort-cached Discovery, personalized For You, precomputed Trending, and sortable Standard browsing
-- A real recommendation engine: per-user genre/author affinity vectors, rebuilt from behavior every 30 minutes
-- A nightly cosine-similarity engine for "similar books," computed pairwise across the whole catalog
-- Hybrid Postgres search — full-text ranking (`tsvector`) combined with trigram fuzzy matching (`pg_trgm`) in a single relevance score
-- Async analytics pipeline via BullMQ, decoupled from the request/response cycle
-- JWT auth + bcrypt + server-verified Google OAuth, with account linking between the two
-- Redis-backed, distributed rate limiting across five different endpoint tiers
-- Personal reading library, CRUD notes, and immutable one-time ratings
-- Keyset (cursor) pagination everywhere — no `OFFSET` performance cliffs, even on large result sets
-- Deployed on Azure with CI/CD via GitHub Actions — every push to `main` ships automatically
 
----
+## Highlights
 
-## Authentication
+- Four feed modes: cohort-cached Discovery, personalized For You, precomputed Trending, and sortable catalog browsing
+- Per-user genre and author affinity vectors rebuilt every 30 minutes
+- Nightly cosine-similarity processing for book-to-book recommendations
+- Hybrid PostgreSQL search using full-text ranking and trigram fuzzy matching
+- BullMQ analytics pipeline that keeps event writes off the request path
+- JWT authentication, bcrypt password hashing, verified Google OAuth, and account linking
+- Redis-backed distributed rate limiting with route-specific tiers
+- Keyset pagination for feeds and library views
+- Personal library, user-scoped notes, and immutable ratings
+- The Librarian: a low-latency conversational interface for books, notes, reading history, and follow-up requests such as “something else” or “more by him”
 
-**Register / Login.** Passwords are hashed with bcrypt (10 salt rounds) before they ever touch the database. Login compares against the stored hash and, on success, issues a JWT (`HS256`, 7-day expiry) scoped to the user's ID.
+## System architecture
 
-**Google OAuth.** The client sends a Google ID token; the server verifies it independently using `google-auth-library`'s `verifyIdToken()` against the configured client audience — the token is never trusted blindly. If the resulting email already exists in the database, the Google identity is linked to that account rather than creating a duplicate. If it doesn't exist, a new user is created with no password hash, so they're Google-only until (if ever) they set one.
-
-**JWT middleware.** Every protected route runs through `protectRoute`, which reads the `Authorization: Bearer <token>` header, verifies it, and attaches the decoded payload to `req.user`. Missing, malformed, or expired tokens are rejected with a `401` before any controller logic runs.
-
-**Forgot / reset password.** A cryptographically random reset token (`crypto.randomBytes(20)`) is generated with a 1-hour expiry and emailed via Nodemailer over Gmail SMTP. To prevent user enumeration, the forgot-password endpoint always returns the same success response, whether or not the email exists in the system.
-
----
-
-## The Feed System
-
-This is the core of the backend — four distinct feed modes, each solving a different problem.
-
-### Discovery Feed
-The question this answers: how do you serve a large, relevant, varied pool of books to many different users without hitting the database on every single request?
-
-Users are deterministically hashed into one of 20 cohort buckets (`getCohortBucket`), so users in the same bucket share one cached candidate pool instead of each triggering their own query. For each bucket, up to 300 books are pulled from Postgres ordered by `base_feed_score`, cached in Redis for 30 minutes, and paginated using a keyset cursor on `(base_feed_score, isbn)` — so scrolling through hundreds of books never degrades the way `OFFSET`-based pagination does. Genre filters are applied at the database level using Postgres's array-overlap operator (`genres && $1::text[]`), and a small randomized scoring wobble keeps repeated visits from feeling static.
-
-### For You Feed (Personalized)
-Reads each user's `genre_weights` / `author_weights` from `user_affinity_weights` — the output of the Affinity Aggregator worker described below — and ranks candidates from their top 3 genres. Books the user has already rated or shelved are explicitly excluded via `NOT EXISTS` subqueries, so the feed never resurfaces something they've already engaged with. Final ranking blends personalization score, base popularity, and a freshness-decay term so older books don't dominate forever. New users with no affinity data yet fall back to the Discovery Feed automatically — there's no cold-start dead end.
-
-### Trending Feed
-Reads a precomputed `trending_score` that the Stats Aggregator worker recalculates every 30 minutes, weighting library adds heaviest, then views, then searches, with a 30% time-decay applied on every cycle so old spikes fade out. The worker writes the result straight into Redis after computing it, so in practice this endpoint is almost always serving a cache hit rather than touching Postgres at request time.
-
-### Standard Feed
-Five sort modes — newest, oldest, top rated, title A–Z, title Z–A — each with its own keyset cursor column and comparison direction, so pagination stays correct and fast regardless of sort order.
-
-Every feed mode respects a `safe_mode=true` query parameter, and the filter is always applied in the SQL `WHERE` clause — never as an application-layer post-filter — so it can't leak content through a cache or pagination edge case.
-
----
-
-## Search
-
-Rather than standing up a separate search index, search here leans on Postgres's own capabilities:
-
-- **Full-text search** — `search_vector @@ websearch_to_tsquery('english', $1)`, ranked with `ts_rank`
-- **Fuzzy/typo-tolerant matching** — `pg_trgm`'s `%` similarity operator against title, author, and genre text
-- Both signals are combined into a single `relevance_score` per result, so a search catches exact matches, partial matches, and typos in one query
-
-A separate, lighter-weight **autocomplete** endpoint (ILIKE prefix + trigram ranking, capped at 12 results) powers instant type-ahead without the overhead of the full search query.
-
----
-
-## Similar Books — Cosine Similarity Engine
-
-Every night at 03:00, the Similarity Aggregator recomputes book-to-book similarity across the catalog:
-
-1. Each book has a `genre_vector` and `author_vector` (JSONB weight maps) stored in `book_feature_vectors`.
-2. Vector magnitudes are pre-computed once per book to avoid redundant square-root calculations during pairwise comparison.
-3. Cosine similarity is calculated between every updated book and every other book in the catalog, combining genre similarity with author similarity — **author overlap is weighted 2× higher** than genre overlap, since two books by the same author tend to be more alike than two books that merely share a genre tag.
-4. Adult and non-adult books are never cross-matched.
-5. The top 50 matches per book are written to `book_similarities` in both directions, so the relationship is queryable from either book.
-
-At read time, results are cached in Redis for 24 hours, and ties in similarity score are broken using a deterministic, per-cohort seeded ordering — so users in different cohorts see slightly different (but equally valid) orderings of equally-similar books.
-
----
-
-## Analytics Pipeline
-
-Every meaningful user action — signup, login, book view, search, rating, library update — is tracked through `trackEvent()`, which pushes a job onto a BullMQ queue and returns immediately. **The API response is never delayed by analytics writes.** A dedicated worker (concurrency: 5) consumes the queue, persists each event to `analytics_events`, and — for book views specifically — increments a denormalized view counter directly on the `books` table for fast reads.
-
-This queue is what feeds both aggregation workers below; nothing about the recommendation system requires a synchronous database write on the request path.
-
----
-
-## Background Workers
-
-Three cron-scheduled workers keep the system's derived data fresh without ever touching the request/response cycle.
-
-| Worker | Schedule | What it does |
-|---|---|---|
-| **Stats Aggregator** | Every 30 min | Rolls up recent views/adds/searches per book, recomputes `average_rating`, applies a 30% decay to trending scores, and recalculates `base_feed_score` from a weighted formula (rating, log-dampened popularity, recent momentum, engagement ratio, freshness). Writes the refreshed trending lists straight to Redis. |
-| **Affinity Aggregator** | Every 30 min | Rebuilds each active user's taste profile in a single atomic SQL statement — recent events are weighted by type (a 4★+ rating counts more than a book view), expanded per-genre and per-author via `CROSS JOIN LATERAL unnest()`, and merged into `user_affinity_weights` with a floor at zero so weights can shrink from low ratings but never go negative. |
-| **Similarity Aggregator** | Daily at 03:00 | Full pairwise cosine-similarity recomputation for any book updated in the last 24 hours, described above. |
-
-All three run as `node-cron` jobs inside the same process as the API server, sharing its Postgres connection pool.
-
----
-
-## Rate Limiting
-
-Rate limiting is Redis-backed (`express-rate-limit` + `rate-limit-redis`), which matters more than it sounds — it means limits are enforced consistently across server restarts and multiple instances, not just held in a single process's memory. Five separate tiers are applied by route sensitivity:
-
-| Tier | Limit | Applies to |
-|---|---|---|
-| Auth | 12 / hour | register, login, Google auth, password reset |
-| Search | 30 / min | search, autocomplete, for-you feed |
-| Content creation | 30 / 15 min | notes create/update/delete |
-| Library & ratings | 100 / 15 min | library status changes, rating submission |
-| General API | 150 / 15 min | everything else |
-
-The rate limiter's key generator also correctly parses `X-Forwarded-For` and handles IPv6 addresses, so client identification stays accurate behind Azure's load balancer rather than rate-limiting the proxy itself.
-
----
-
-## Personal Library, Notes & Ratings
-
-**Library** — Books are tracked under `wishlist`, `reading`, or `finished`. Adding and status-updating share a single endpoint via `INSERT ... ON CONFLICT (user_id, isbn) DO UPDATE`, so there's no separate "add" vs. "update" code path to keep in sync.
-
-**Notes** — Full CRUD, entirely user-scoped (every query includes `WHERE user_id = $1`), with `ILIKE`-based search across title and content.
-
-**Ratings** — Immutable by design: once a user rates a book, re-rating is rejected with a clear `403`. Valid range is enforced (1–5) before the database is touched.
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Runtime | Node.js 22 LTS, ES Modules throughout |
-| Framework | Express 5 |
-| Database | PostgreSQL (Azure Database for PostgreSQL — Flexible Server) |
-| Cache & rate-limit store | Redis (Azure Managed Redis Enterprise, cluster-mode client via `ioredis`) |
-| Job queue | BullMQ |
-| Scheduling | node-cron |
-| Auth | JWT (`jsonwebtoken`, HS256), bcrypt, Google OAuth (`google-auth-library`) |
-| Rate limiting | `express-rate-limit` + `rate-limit-redis` |
-| Email | Nodemailer (Gmail SMTP) |
-| Search | Native PostgreSQL full-text search (`tsvector`) + `pg_trgm` fuzzy matching |
-| Deployment | Azure Web App, CI/CD via GitHub Actions (auto-deploy on push to `main`) |
-
----
-
-## Project Structure
-
+```mermaid
+flowchart LR
+  C[React client] -->|JWT REST requests| API[Express API]
+  API --> PG[(PostgreSQL)]
+  API --> R[(Redis)]
+  API --> Q[BullMQ]
+  Q --> AW[Analytics worker]
+  CRON[Scheduled workers] --> PG
+  CRON --> R
+  AW --> PG
+  API --> L[Librarian orchestration]
+  L --> PG
+  L --> R
 ```
+
+## Request workflow
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant C as Client
+  participant A as API
+  participant R as Redis
+  participant P as PostgreSQL
+  participant W as Workers
+
+  U->>C: Browse, search, rate, save, or ask
+  C->>A: Authenticated request
+  A->>R: Read cached derived data when available
+  alt Cache miss or source-of-truth query
+    A->>P: Query indexed data
+  end
+  A-->>C: Fast response with cursor or structured cards
+  A->>W: Queue analytics event asynchronously
+  W->>P: Persist event and refresh derived data on schedule
+  W->>R: Refresh cached trend and recommendation outputs
+```
+
+## Feed system
+
+| Mode | Purpose | How it stays fast |
+|---|---|---|
+| Discovery | A varied, relevant catalog for broad exploration | Users map deterministically to one of 20 cohorts. Each cohort shares a Redis-cached candidate pool and uses keyset pagination. |
+| For You | Personalized recommendations | Reads precomputed genre and author affinities, excludes books already rated or shelved, and falls back to Discovery for cold start. |
+| Trending | What is gaining attention now | Reads precomputed trend scores refreshed every 30 minutes with time decay. |
+| Standard | Predictable catalog sorting | Uses one keyset strategy per sort order: newest, oldest, rating, and title order. |
+
+All feed queries honor `safe_mode=true` in SQL, rather than filtering after retrieval.
+
+## Search and similarity
+
+Search combines PostgreSQL full-text search (`tsvector` and `websearch_to_tsquery`) with `pg_trgm` fuzzy matching across title, author, and genre data. The result is a single relevance score that supports exact queries, partial matches, and common typos without a separate search service.
+
+The similarity worker stores genre and author feature vectors for books, precomputes vector magnitudes, and calculates cosine similarity. Author overlap receives twice the weight of genre overlap. Adult and non-adult books are never matched, and the best 50 matches per book are stored bidirectionally. Similar-book responses are cached in Redis for 24 hours.
+
+## Background processing
+
+| Worker | Schedule | Responsibility |
+|---|---|---|
+| Analytics | Queue consumer | Persists activity events and increments denormalized view counters without delaying the originating request. |
+| Stats aggregator | Every 30 minutes | Recalculates rating, popularity, momentum, trending score, and base feed score; refreshes Redis trend lists. |
+| Affinity aggregator | Every 30 minutes | Rebuilds active users’ author and genre taste weights from weighted recent activity. |
+| Similarity aggregator | Daily at 03:00 | Recomputes cosine similarity for recently updated books. |
+
+## The Librarian
+
+The Librarian adds a conversational layer without making every message an expensive model call. Direct intent routing handles common requests first, then structured tools fetch catalog books, notes, ratings, reading history, and ranked genre results. A compact conversation reference tracks the active book, author, genre, notes, and previously shown ISBNs.
+
+### Librarian architecture
+
+```mermaid
+flowchart TB
+  U[Reader message] --> C[Librarian controller]
+  C --> S[Librarian service]
+  S --> D{Direct intent router}
+  D -->|Known intent| X[Tool executor]
+  D -->|Ambiguous intent| A[Constrained agent fallback]
+  A --> X
+  X --> T[Read-only catalog and user tools]
+  T --> PG[(PostgreSQL)]
+  T --> R[(Redis)]
+  S --> M[Response normalizer]
+  M --> O[Structured chat payload]
+  O --> U
+  R <--> CTX[Short-lived conversation context]
+```
+
+The architecture deliberately separates four concerns:
+
+- **Intent recognition:** identifies whether a request is about ratings, history, notes, a title, an author, a genre, a recommendation, or a follow-up.
+- **Reference resolution:** resolves phrases such as `it`, `this book`, `him`, `these`, `more`, and `something else` against short-lived context rather than treating them as fresh keyword searches.
+- **Tool execution:** reads only the authenticated user’s notes, ratings, library, and catalog data through bounded, parameterized queries.
+- **Presentation contract:** turns raw rows into stable `books`, `notes`, and message fields so the frontend can render cards without scraping text.
+
+### Librarian request flow
+
+```mermaid
+sequenceDiagram
+  participant U as Reader
+  participant UI as Chat UI
+  participant LC as Librarian controller
+  participant LR as Direct router
+  participant CTX as Redis context
+  participant TE as Tool executor
+  participant DB as PostgreSQL
+
+  U->>UI: “Give me highly rated horror books”
+  UI->>LC: POST /api/librarian/chat
+  LC->>LR: Parse message with user and conversation ID
+  LR->>CTX: Read active genre and shown ISBNs
+  LR->>TE: get_highest_rated_genre_books(horror, excludedISBNs)
+  TE->>DB: Indexed, parameterized catalog query
+  DB-->>TE: Normalized book rows with covers and authors
+  TE-->>LC: Structured recommendations
+  LC->>CTX: Save genre and newly shown ISBNs with TTL
+  LC-->>UI: Message plus book cards
+  U->>UI: “Something else”
+  UI->>LC: Follow-up with same conversation ID
+  LC->>CTX: Read genre and shown ISBNs
+  LC->>TE: Same genre with typed ISBN exclusion array
+  TE-->>LC: Non-repeated book cards
+  LC-->>UI: Next results
+```
+
+### Data contract
+
+The endpoint returns structured data rather than embedding the product UI in Markdown. A representative response has a human-readable `message`, optional `books`, optional `notes`, and a stable `conversationId`. Every book item includes an ISBN, title, author string, cover URL when available, and a route-safe URL. Every note item includes its note ID and title. This keeps the API independently testable and prevents client rendering differences between a first response and a later follow-up.
+
+```json
+{
+  "success": true,
+  "data": {
+    "conversationId": "uuid",
+    "message": "Here are highly rated horror books.",
+    "books": [
+      {
+        "isbn": "9780000000000",
+        "title": "Example Book",
+        "author": "Example Author",
+        "cover_image": "https://...",
+        "url": "/books/9780000000000"
+      }
+    ],
+    "notes": []
+  }
+}
+```
+
+### Latency and correctness choices
+
+| Choice | Reason | Tradeoff |
+|---|---|---|
+| Direct routing before an agent fallback | Common requests avoid model latency and have deterministic behavior. | More intent patterns must be maintained and tested. |
+| Redis context with TTL | Follow-ups resolve quickly and context expires naturally. | Context is intentionally non-durable; Redis loss degrades only the conversational reference. |
+| Shown-ISBN exclusion | `Something else` produces genuinely new recommendations. | The recent exclusion list is bounded; a very long session needs reset behavior or a durable session store. |
+| Structured tool output | Covers, authors, note links, and routes remain consistent. | The response schema must evolve carefully with the client. |
+| Read-only tools | The chat cannot mutate ratings, notes, library state, or catalog data. | Actions remain explicit REST mutations elsewhere in the product. |
+
+### Deterministic execution model
+
+Most useful reader requests do not need a generative model. The service first executes a deterministic route for:
+
+| Request family | Example | Data path |
+|---|---|---|
+| Title or ISBN | `I want to read The Palace of Illusions` | Exact/fuzzy catalog lookup, then exact-title selection when available. |
+| Genre browsing | `Show fantasy books` | Dedicated genre query that prioritizes primary-genre matches, preventing broad multi-tag books from dominating unrelated genre requests. |
+| Rankings | `Highest-rated poetry books` | Average-rating query with a typed ISBN exclusion array for follow-ups. |
+| Personal recommendation | `What should I read next?` | Rated or recently read source book, then precomputed similarity lookup; trending is only a cold-start fallback. |
+| Author continuation | `More by Rabindranath Tagore` | Author-only search with previously shown ISBNs excluded. |
+| Notes, ratings, history | `Do I have a note about The Lake House?` | Authenticated user-scoped query. |
+| Trending | `What is trending?` | The same Redis key family and ranking used by the main Trending feed. |
+
+The constrained tool-agent fallback is retained for ambiguous requests. It can only call allowlisted read tools. It is not allowed to invent catalog IDs, note IDs, routes, or book data; tool output is normalized before it reaches the response builder.
+
+### Conversation-state contract
+
+Redis holds short-lived session state, not permanent chat history. The current bound is 32 transcript messages with a one-hour TTL. The reference object stores the last book, author, genre recommendation, recommendation type, and a bounded list of up to 100 shown ISBNs. That state is sufficient for `this`, `that`, `these`, `more by him`, and `something else`, but it cannot override an explicit new subject. A fresh title, author, genre, note, or ranking request always starts a new deterministic branch.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Empty
+  Empty --> BookContext: exact title / ISBN / history
+  Empty --> GenreSession: genre request
+  Empty --> AuthorSession: author request
+  Empty --> PersonalSession: next-read request
+  GenreSession --> GenreSession: more / other / except these
+  AuthorSession --> AuthorSession: more by author / by them
+  PersonalSession --> PersonalSession: something else
+  BookContext --> BookContext: this / it / similar to it
+  BookContext --> GenreSession: explicit genre request
+  GenreSession --> BookContext: explicit title request
+  AuthorSession --> PersonalSession: explicit next-read request
+```
+
+### Failure behavior
+
+- Redis context unavailable: the request remains functional; only a pronoun-only follow-up loses its reference and receives a clear recovery response.
+- Trending cache miss: the Librarian queries the PostgreSQL trending score and refreshes the same Redis key used by the feed.
+- Tool returns no rows: the response says that the scoped catalog/user query returned no matches, rather than falling back to unrelated recommendations.
+- Agent tool failure: the failure is contained to the request, logged server-side, and never returned as raw database or provider error text.
+
+That enables natural follow-ups while preserving low latency:
+
+```text
+Give me some highly rated horror books
+Some other horror books
+Except these books
+
+Give me books by George Orwell
+Which is the highest rated among these?
+
+Tell me about The Palace of Illusions
+What else has this author written?
+```
+
+Book result cards include title, author, cover image, and route. Note result cards use a note icon and link to the relevant saved note when available.
+
+## Authentication and safety
+
+- Passwords are hashed with bcrypt before storage.
+- JWTs use HS256 and are scoped to the user identity.
+- Google ID tokens are verified server-side with `google-auth-library`; an existing email is linked rather than duplicated.
+- Protected routes validate `Authorization: Bearer <token>` before controller logic runs.
+- Password-reset requests use cryptographically random expiring tokens and return a uniform response to avoid account enumeration.
+- Notes are always queried with the authenticated `user_id` scope.
+- Ratings are validated from 1 through 5 and are immutable once recorded.
+
+## Rate limiting
+
+| Tier | Limit | Scope |
+|---|---:|---|
+| Authentication | 12 per hour | Registration, login, Google auth, and password reset |
+| Search | 30 per minute | Search, autocomplete, and personalized feed |
+| Content creation | 30 per 15 minutes | Note creation, update, and deletion |
+| Library and ratings | 100 per 15 minutes | Library changes and rating submission |
+| General API | 150 per 15 minutes | Remaining routes |
+
+Limits use Redis so enforcement remains consistent across process restarts and multiple API instances.
+
+## Technology
+
+| Area | Technology |
+|---|---|
+| Runtime | Node.js 22, ES modules |
+| HTTP | Express 5 |
+| Data | PostgreSQL on Azure Database for PostgreSQL Flexible Server |
+| Cache and limits | Redis, ioredis, rate-limit-redis |
+| Jobs | BullMQ and node-cron |
+| Authentication | jsonwebtoken, bcrypt, google-auth-library |
+| Search | PostgreSQL full-text search and pg_trgm |
+| Email | Nodemailer with Gmail SMTP |
+| Deployment | Azure Web App and GitHub Actions |
+
+## Project layout
+
+```text
 buqs-server/
 ├── controllers/
-│   ├── auth.controller.js       # register, login, googleAuth, forgotPassword, resetPassword
-│   ├── book.controller.js       # discovery/for-you/trending/standard feeds, search, autocomplete, similar books
-│   ├── library.controller.js    # updateLibraryStatus, getUserLibrary, getBookStatus, removeFromLibrary
-│   ├── note.controller.js       # createNote, getNotes, getNoteById, updateNotes, deleteNote
-│   ├── rating.controller.js     # submitRating, getUserRating
-│   └── user.controller.js       # getMe
 ├── db/
-│   └── db.js                    # PostgreSQL connection pool
+├── librarian/
 ├── middlewares/
-│   ├── auth.middleware.js       # JWT protectRoute
-│   └── rateLimiter.js           # Redis-backed rate limit tiers
 ├── queues/
-│   └── analytics.queue.js       # BullMQ queue + trackEvent() helper
 ├── routes/
-│   ├── auth.routes.js
-│   ├── book.routes.js
-│   ├── library.routes.js
-│   ├── note.routes.js
-│   ├── rating.routes.js
-│   └── user.routes.js
 ├── utils/
-│   ├── generateToken.js         # JWT signing
-│   ├── googleClientConfig.js    # OAuth2Client singleton
-│   ├── random.js                # getCohortBucket, seededRandom
-│   └── redisConnection.js       # ioredis Cluster client (Azure Managed Redis)
 ├── workers/
-│   ├── analytics.worker.js      # BullMQ consumer — event persistence + view counter
-│   ├── affinityAggregator.js    # Every 30 min — user taste vector rebuild
-│   ├── similarityAggregator.js  # Daily 03:00 — cosine similarity matrix
-│   └── statsAggregator.js       # Every 30 min — book scores + trending refresh
-└── server.js                    # Entry point, ordered startup sequence
+└── server.js
 ```
 
----
+## API surface
 
-## API Reference
-
-```
-# Health
+```text
 GET    /health
 
-# Auth (public)
 POST   /api/auth/register
 POST   /api/auth/login
 POST   /api/auth/google-auth
 POST   /api/auth/forgot-password
 POST   /api/auth/reset-password/:resetToken
 
-# Users (protected)
 GET    /api/users/me
 
-# Books (protected)
-GET    /api/books                 ?sort=discovery|newest|oldest|top_rated|title_a_z|title_z_a
-                                   &genre=Fiction,Mystery&limit=20&safe_mode=true
-GET    /api/books/for-you         (personalized feed, same cursor pattern as discovery)
-GET    /api/books/trending        ?limit=10&safe_mode=true
-GET    /api/books/search          ?query=dune&limit=20&offset=0&safe_mode=true
-GET    /api/books/autocomplete    ?query=dun&safe_mode=true
+GET    /api/books
+GET    /api/books/for-you
+GET    /api/books/trending
+GET    /api/books/search
+GET    /api/books/autocomplete
 GET    /api/books/:isbn
-GET    /api/books/:isbn/similar   ?limit=10&safe_mode=true
+GET    /api/books/:isbn/similar
 
-# Library (protected)
-GET    /api/library               ?status=wishlist|reading|finished&limit=20
-POST   /api/library/status        { isbn, status }
+GET    /api/library
+POST   /api/library/status
 GET    /api/library/status/:isbn
 DELETE /api/library/:isbn
 
-# Notes (protected)
-GET    /api/notes                 ?search=...&limit=15
-POST   /api/notes                 { title, content }
+GET    /api/notes
+POST   /api/notes
 GET    /api/notes/:id
-PUT    /api/notes/:id             { title, content }
+PUT    /api/notes/:id
 DELETE /api/notes/:id
 
-# Ratings (protected)
-POST   /api/ratings               { isbn, rating: 1-5 }   ← immutable, one per user per book
+POST   /api/ratings
 GET    /api/ratings/:isbn/me
+
+POST   /api/librarian/chat
 ```
 
----
+## Librarian test prompts
 
-## Deployment
+Use these as a quick regression pass after a deployment. Prompts that reference user data require the relevant data to exist for the authenticated account.
 
-Deployed on **Azure Web App** (Linux, Node 22), with **PostgreSQL Flexible Server(Burstable B1ms)** and **Azure Managed Redis Enterprise** as managed backing services. CI/CD runs through **GitHub Actions**: every push to `main` triggers a build and automatic deploy to production — no manual deployment step.
+1. `What have I rated recently?`
+2. `Show me books similar to my last read`
+3. `Show some more like this`
+4. `Give me books by George Orwell`
+5. `Give me the highest rated among these books`
+6. `Give me some highly rated horror books`
+7. `Some other horror books`
+8. `Except these books`
+9. `Tell me about The Palace of Illusions by Chitra Banerjee Divakaruni`
+10. `What else has this author written?`
+11. `Show me my notes`
+12. `Do I have a note about The Lake House?`
+13. `What should I read next?` followed by `Something else`
+14. `Show me fantasy books` followed by `Show more`
+15. `I want to read The Palace of Illusions`
+16. `More by Rabindranath Tagore`
+
+
+## Production deployment
+
+The API is deployed to Azure Web App on Linux with Azure Database for PostgreSQL Flexible Server and Azure Managed Redis Enterprise. GitHub Actions deploys every push to `main`, keeping the deployment path repeatable and avoiding manual production changes.
+
+## Technical notes
+
+BUQS is intentionally more than a CRUD project. The implementation demonstrates several production-oriented concerns:
+
+- **Measured database work:** query decisions are validated with `EXPLAIN ANALYZE`; a targeted optimization reduced one measured query from 57.7 ms to 1.26 ms and reduced buffer reads by 96.5%.
+- **Explicit consistency model:** catalog and user writes are transactional; trends, affinities, analytics, and similarity edges are asynchronously derived and eventually consistent.
+- **Performance-aware pagination:** feeds use keyset cursors instead of large offsets, preserving predictable work as a reader scrolls.
+- **Security boundaries:** protected endpoints authenticate before controller work, user-owned resources are scoped by `user_id`, and the Librarian’s tool set is read-only and catalog-grounded.
+- **Operational tradeoffs:** Redis improves repeated reads and distributed rate limiting; BullMQ isolates analytics; scheduled derivation avoids expensive synchronous scoring. A larger deployment would run scheduled work in dedicated workers or with leader election rather than every web instance.
