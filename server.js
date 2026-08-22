@@ -11,6 +11,7 @@ import bookRoutes from './routes/book.routes.js';
 import noteRoutes from './routes/note.routes.js';
 import ratingRoutes from './routes/rating.routes.js';
 import libraryRoutes from './routes/library.routes.js';
+import librarianRoutes from './routes/librarian.routes.js';
 
 
 import './workers/analytics.worker.js';
@@ -43,6 +44,7 @@ app.use('/api/books', bookRoutes);
 app.use('/api/notes', noteRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/library', libraryRoutes);
+app.use('/api/librarian', librarianRoutes);
 
 
 const initializeBackgroundWorkers = () => {
@@ -55,7 +57,7 @@ const initializeBackgroundWorkers = () => {
 const startServer = async () => {
     try {
 
-        await pool.connect();
+        await pool.query('SELECT 1');
         console.log('[Database] Connected to PostgreSQL successfully.');
         initializeBackgroundWorkers();
 
