@@ -96,15 +96,31 @@ export const extractBookTitleFromMessage = (
 export const extractAuthorFromMessage = (
     message
 ) => {
-    const match = String(message || '').match(
-        /\b(?:books?|novels?|works?|stories?)\s+(?:by|from|of|my)\s+["“]?(.+?)["”]?[.!?]?$/i
-    );
+    const value = String(message || '').trim();
+    const patterns = [
+        /\b(?:books?|novels?|works?|stories?)\s+(?:by|from|of)\s+["“]?(.+?)["”]?[.!?]?$/i,
+        /\b(?:by|from)\s+["“]?(.+?)["”]?\s+(?:books?|novels?|works?|stories?)[.!?]?$/i
+    ];
 
-    return match?.[1]
-        ? match[1]
+    for (const pattern of patterns) {
+        const match = value.match(pattern);
+
+        if (!match?.[1]) {
+            continue;
+        }
+
+        const author = match[1]
             .replace(/^["“']|["”']$/g, '')
-            .trim()
-        : null;
+            .replace(/\s+(?:with|whose|that|which)\s+.+$/i, '')
+            .replace(/\s+(?:rated?|ratings?)\s*(?:above|below|over|under|more than|less than|at least|at most|>=|<=|>|<).+$/i, '')
+            .trim();
+
+        if (author.length >= 2 && author.length <= 100) {
+            return author;
+        }
+    }
+
+    return null;
 };
 
 export const isAuthorBookRequest = (
@@ -165,13 +181,25 @@ export const extractRecommendationGenres = (
 ) => {
     const value = String(message || '').toLowerCase();
     const genres = [];
+    const matchedAliases = [];
 
     for (const [alias, genre] of GENRE_ALIASES) {
         const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const pattern = new RegExp(`(?:^|[^a-z])${escaped}(?:$|[^a-z])`, 'i');
 
-        if (pattern.test(value) && !genres.includes(genre)) {
+        const isPartOfSpecificMatch = matchedAliases.some(
+            (matchedAlias) =>
+                matchedAlias !== alias &&
+                matchedAlias.includes(alias)
+        );
+
+        if (
+            pattern.test(value) &&
+            !isPartOfSpecificMatch &&
+            !genres.includes(genre)
+        ) {
             genres.push(genre);
+            matchedAliases.push(alias);
         }
     }
 
@@ -187,18 +215,146 @@ export const isGenreRecommendationRequest = (
         extractRecommendationGenres(value).length > 0;
 };
 
+const toRatingNumber = (value) => {
+    const rating = Number(value);
+
+    return Number.isFinite(rating) && rating >= 1 && rating <= 5
+        ? rating
+        : null;
+};
+
+export const extractCatalogRatingRequest = (
+    message
+) => {
+    const value = String(message || '')
+        .trim()
+        .toLowerCase();
+
+    const descending =
+        /\b(?:highest|top|best|greatest)(?:\s+(?:rated|[a-z]+)){0,2}\s+(?:books?|novels?|works?|stories?)\b/.test(value) ||
+        /\b(?:highest|top|best|high(?:ly)?)[-\s]*rated\b/.test(value);
+
+    const ascending =
+        /\b(?:lowest|worst|least)(?:\s+(?:rated|[a-z]+)){0,2}\s+(?:books?|novels?|works?|stories?)\b/.test(value) ||
+        /\b(?:lowest|worst|least)[-\s]*rated\b/.test(value);
+
+    const ratingLanguage =
+        /\b(?:rating|ratings|rated|star|stars)\b/.test(value) ||
+        descending ||
+        ascending;
+
+    let minimumRating = null;
+    let minimumInclusive = false;
+    let maximumRating = null;
+    let maximumInclusive = false;
+
+    const minimumMatch = value.match(
+        /\b(?:rating|ratings|rated|stars?)\s*(?:of\s*)?(more than|over|above|greater than|at least|at\s+or\s+above|>=|>)\s*(\d(?:\.\d)?)/i
+    );
+
+    if (minimumMatch) {
+        const operator = minimumMatch[1];
+        const rating = toRatingNumber(minimumMatch[2]);
+
+        if (rating != null) {
+            minimumRating = rating;
+            minimumInclusive = /at least|at\s+or\s+above|>=|\+|or more/i.test(
+                String(operator || '')
+            );
+        }
+    }
+
+    const minimumPlusMatch = value.match(
+        /\b(?:rating|ratings|rated|stars?)\s*(?:of\s*)?(\d(?:\.\d)?)\s*(\+|or more)\b/i
+    ) || value.match(
+        /\b(\d(?:\.\d)?)\s*(\+|or more)\s*(?:stars?|rating|rated)\b/i
+    );
+
+    if (minimumRating == null && minimumPlusMatch) {
+        const rating = toRatingNumber(minimumPlusMatch[1]);
+
+        if (rating != null) {
+            minimumRating = rating;
+            minimumInclusive = true;
+        }
+    }
+
+    const maximumMatch = value.match(
+        /\b(?:rating|ratings|rated|stars?)\s*(?:of\s*)?(less than|under|below|fewer than|at most|at\s+or\s+below|<=|<)\s*(\d(?:\.\d)?)/i
+    );
+
+    if (maximumMatch) {
+        const rating = toRatingNumber(maximumMatch[2]);
+
+        if (rating != null) {
+            maximumRating = rating;
+            maximumInclusive = /at most|at\s+or\s+below|<=/i.test(
+                maximumMatch[1]
+            );
+        }
+    }
+
+    const maximumPhraseMatch = value.match(
+        /\b(?:rating|ratings|rated|stars?)\s*(?:of\s*)?(\d(?:\.\d)?)\s*(or less|or below)\b/i
+    );
+
+    if (maximumRating == null && maximumPhraseMatch) {
+        const rating = toRatingNumber(maximumPhraseMatch[1]);
+
+        if (rating != null) {
+            maximumRating = rating;
+            maximumInclusive = true;
+        }
+    }
+
+    return {
+        hasRatingIntent:
+            ratingLanguage ||
+            minimumRating != null ||
+            maximumRating != null,
+        hasRankingIntent:
+            descending ||
+            ascending,
+        hasThreshold:
+            minimumRating != null ||
+            maximumRating != null,
+        sortDirection: ascending
+            ? 'asc'
+            : 'desc',
+        minimumRating,
+        minimumInclusive,
+        maximumRating,
+        maximumInclusive
+    };
+};
+
 export const asksForHighestRated = (
     message
-) =>
-    containsAny(message, [
-        'highest rated',
-        'best rated',
-        'top rated',
-        'best rated among these',
-        'highest rated among these'
-    ]);
+) => {
+    const rating = extractCatalogRatingRequest(message);
+
+    return rating.hasRatingIntent &&
+        rating.sortDirection === 'desc';
+};
+
+export const asksForRatingAmongCurrentResults = (
+    message
+) => {
+    const value = String(message || '').toLowerCase();
+    const rating = extractCatalogRatingRequest(value);
+
+    return rating.hasRatingIntent &&
+        /\b(?:among|of)\s+(?:these|those|them|the\s+(?:last\s+)?(?:books?|results?|recommendations?))\b/.test(value);
+};
 
 export const extractRatedGenre = (message) => {
+    const rating = extractCatalogRatingRequest(message);
+    const genres = extractRecommendationGenres(message);
+
+    if (rating.hasRatingIntent && genres.length === 1) {
+        return genres[0];
+    }
+
     const match = String(message || '').match(
         /\b(?:highest|high(?:ly)?|top|best)[-\s]*rated\s+(.+?)\s+books?\b/i
     );

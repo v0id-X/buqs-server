@@ -20,6 +20,69 @@ export const librarianTools = [
         type: 'function',
         function: {
             name:
+                'get_catalog_books',
+            description:
+                'Retrieve catalog books using safe structured constraints. Use this for complex catalog requests that combine an author, one or more genres, an average-rating threshold, or a best/highest versus worst/lowest rating order. average ratings are catalog ratings, not the authenticated users personal ratings. Do not use it for the users own ratings or notes. Omit constraints the user did not request.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    author: {
+                        type: 'string',
+                        minLength: 2,
+                        maxLength: 100
+                    },
+                    genres: {
+                        type: 'array',
+                        items: {
+                            type: 'string',
+                            minLength: 1,
+                            maxLength: 100
+                        },
+                        maxItems: 5
+                    },
+                    minimumRating: {
+                        type: 'number',
+                        minimum: 1,
+                        maximum: 5
+                    },
+                    minimumInclusive: {
+                        type: 'boolean'
+                    },
+                    maximumRating: {
+                        type: 'number',
+                        minimum: 1,
+                        maximum: 5
+                    },
+                    maximumInclusive: {
+                        type: 'boolean'
+                    },
+                    sortDirection: {
+                        type: 'string',
+                        enum: [
+                            'asc',
+                            'desc'
+                        ]
+                    },
+                    withinLastResults: {
+                        type: 'boolean',
+                        description: 'Set true only when the user explicitly asks to rank, filter, or compare the books from the preceding response. The server supplies the prior ISBN set; never provide ISBNs yourself.'
+                    },
+                    limit: {
+                        type: 'integer',
+                        minimum: 1,
+                        maximum: 20
+                    }
+                },
+                additionalProperties:
+                    false
+            }
+        }
+    },
+
+    {
+        type: 'function',
+        function: {
+            name:
                 'get_reading_history',
             description:
                 'Get the authenticated users recent reading/library activity. Only use this when the user explicitly asks about books they have read, finished, are reading, or their reading history.',

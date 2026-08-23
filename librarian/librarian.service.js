@@ -50,6 +50,60 @@ const saveResponse = async (
     );
 };
 
+const getPreviousShownIsbns = (
+    context
+) => [
+    ...new Set([
+        ...(Array.isArray(
+            context?.lastRecommendation?.shownIsbns
+        )
+            ? context.lastRecommendation.shownIsbns
+            : []),
+        ...(Array.isArray(
+            context?.lastGenreRecommendation?.shownIsbns
+        )
+            ? context.lastGenreRecommendation.shownIsbns
+            : [])
+    ]
+        .map((isbn) => String(isbn || '').trim())
+        .filter(Boolean))
+].slice(-100);
+
+const attachLibrarianMetrics = (
+    response,
+    metrics
+) => {
+    if (!response || typeof response !== 'object') {
+        return response;
+    }
+
+    Object.defineProperty(
+        response,
+        '__librarianMetrics',
+        {
+            value: metrics,
+            enumerable: false,
+            configurable: false,
+            writable: false
+        }
+    );
+
+    return response;
+};
+
+const getRouteName = (
+    prefix,
+    results
+) => {
+    const tool = Array.isArray(results)
+        ? results[0]?.tool
+        : null;
+
+    return tool
+        ? `${prefix}:${tool}`
+        : prefix;
+};
+
 export const generateLibrarianResponse =
     async (
         userId,
@@ -79,6 +133,14 @@ export const generateLibrarianResponse =
                     message
                 );
 
+            const previousShownIsbns =
+                getPreviousShownIsbns(
+                    initialContext
+                );
+
+            let route =
+                'deterministic_book_lookup';
+
             const deterministicBook =
                 await executeDeterministicBookLookup({
                     userId,
@@ -100,7 +162,14 @@ export const generateLibrarianResponse =
                     deterministicBook.disambiguation
                 );
 
-                return deterministicBook.disambiguation;
+                return attachLibrarianMetrics(
+                    deterministicBook.disambiguation,
+                    {
+                        route:
+                            'deterministic_book_lookup_disambiguation',
+                        previousShownIsbns
+                    }
+                );
             }
 
             let context =
@@ -112,6 +181,11 @@ export const generateLibrarianResponse =
             if (
                 deterministicBook.handled
             ) {
+                route = getRouteName(
+                    'deterministic_book_lookup',
+                    deterministicBook.results
+                );
+
                 results =
                     deterministicBook.results;
             } else {
@@ -132,9 +206,16 @@ export const generateLibrarianResponse =
                 if (
                     direct.handled
                 ) {
+                    route = getRouteName(
+                        'direct',
+                        direct.results
+                    );
+
                     results =
                         direct.results;
                 } else {
+                    route = 'agent_fallback';
+
                     const agent =
                         await executeAgentRequest({
                             userId,
@@ -189,7 +270,14 @@ export const generateLibrarianResponse =
                     disambiguation
                 );
 
-                return disambiguation;
+                return attachLibrarianMetrics(
+                    disambiguation,
+                    {
+                        route:
+                            `${route}_disambiguation`,
+                        previousShownIsbns
+                    }
+                );
             }
 
             const deterministic =
@@ -215,7 +303,13 @@ export const generateLibrarianResponse =
                 finalResponse
             );
 
-            return finalResponse;
+            return attachLibrarianMetrics(
+                finalResponse,
+                {
+                    route,
+                    previousShownIsbns
+                }
+            );
         } finally {
             console.timeEnd(
                 `[Librarian:${conversationId}] total`

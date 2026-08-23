@@ -235,6 +235,7 @@ export const saveRecommendationContext =
             kind = 'genre',
             genres = [],
             author = null,
+            rating = null,
             books = []
         } = {}
     ) => {
@@ -246,13 +247,37 @@ export const saveRecommendationContext =
             )]
             : [];
 
+        const normalizedRating = rating &&
+            typeof rating === 'object'
+            ? {
+                sortDirection:
+                    rating.sortDirection === 'asc'
+                        ? 'asc'
+                        : 'desc',
+                minimumRating:
+                    Number.isFinite(Number(rating.minimumRating))
+                        ? Number(rating.minimumRating)
+                        : null,
+                minimumInclusive:
+                    Boolean(rating.minimumInclusive),
+                maximumRating:
+                    Number.isFinite(Number(rating.maximumRating))
+                        ? Number(rating.maximumRating)
+                        : null,
+                maximumInclusive:
+                    Boolean(rating.maximumInclusive)
+            }
+            : null;
+
         const previous = context?.lastRecommendation;
         const isSameRecommendation =
             previous?.kind === kind &&
             String(previous?.author || '').toLowerCase() ===
                 String(author || '').trim().toLowerCase() &&
             JSON.stringify(previous?.genres || []) ===
-                JSON.stringify(normalizedGenres);
+                JSON.stringify(normalizedGenres) &&
+            JSON.stringify(previous?.rating || null) ===
+                JSON.stringify(normalizedRating);
 
         const previousIsbns = isSameRecommendation &&
             Array.isArray(previous?.shownIsbns)
@@ -274,6 +299,7 @@ export const saveRecommendationContext =
                 kind,
                 genres: normalizedGenres,
                 author: author ? String(author).trim() : null,
+                rating: normalizedRating,
                 shownIsbns
             }
         };

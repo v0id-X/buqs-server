@@ -23,7 +23,8 @@ import {
     isAuthorReferenceRequest,
     extractAuthorFollowUp,
     asksForHighestRated,
-    extractRatedGenre,
+    extractCatalogRatingRequest,
+    asksForRatingAmongCurrentResults,
     asksForMoreResults,
     extractRecommendationGenres,
     isGenreRecommendationRequest,
@@ -563,7 +564,8 @@ const getRecommendationExclusions = (
     kind,
     {
         genres = [],
-        author = null
+        author = null,
+        rating = null
     } = {}
 ) => {
     const previous = context?.lastRecommendation;
@@ -579,7 +581,13 @@ const getRecommendationExclusions = (
         String(previous.author || '').toLowerCase() ===
         String(author || '').trim().toLowerCase();
 
-    return sameAuthor && sameGenres(previous.genres, genres)
+    const sameRating =
+        JSON.stringify(previous.rating || null) ===
+        JSON.stringify(rating || null);
+
+    return sameAuthor &&
+        sameGenres(previous.genres, genres) &&
+        sameRating
         ? previous.shownIsbns
         : [];
 };
@@ -607,6 +615,37 @@ const getRecentShownIsbns = (
     ].slice(-100);
 };
 
+const getLastShownIsbns = (
+    context
+) => {
+    const shown = context?.lastRecommendation?.shownIsbns;
+
+    return Array.isArray(shown)
+        ? [...new Set(
+            shown
+                .map((isbn) => String(isbn || '').trim())
+                .filter(Boolean)
+        )].slice(-100)
+        : [];
+};
+
+const toCatalogRatingMetadata = (
+    rating
+) => ({
+    sortDirection:
+        rating?.sortDirection === 'asc'
+            ? 'asc'
+            : 'desc',
+    minimumRating:
+        rating?.minimumRating ?? null,
+    minimumInclusive:
+        Boolean(rating?.minimumInclusive),
+    maximumRating:
+        rating?.maximumRating ?? null,
+    maximumInclusive:
+        Boolean(rating?.maximumInclusive)
+});
+
 export const executeDirectRequest =
     async ({
         userId,
@@ -615,14 +654,20 @@ export const executeDirectRequest =
         context,
         isSafeMode
     }) => {
-        const ratedGenre =
-            extractRatedGenre(message);
-
         const requestedGenres =
             extractRecommendationGenres(message);
 
         const isExplicitGenreRequest =
             isGenreRecommendationRequest(message);
+
+        const ratingRequest =
+            extractCatalogRatingRequest(message);
+
+        const explicitAuthor =
+            extractAuthorFromMessage(message);
+
+        const ratingAmongCurrentResults =
+            asksForRatingAmongCurrentResults(message);
 
         const explicitAuthorFollowUp =
             extractAuthorFollowUp(message);
@@ -631,32 +676,104 @@ export const executeDirectRequest =
             asksForRecommendation(message) &&
             asksForPersonalizedRecommendation(message);
 
-        if (ratedGenre) {
+        const previousCatalogRating =
+            context?.lastRecommendation?.kind ===
+                'catalog_rating'
+                ? context.lastRecommendation
+                : null;
+
+        const previousRecommendation =
+            context?.lastRecommendation ||
+            null;
+
+        const isExplicitCatalogRatingRequest =
+            ratingRequest.hasRankingIntent ||
+            ratingRequest.hasThreshold;
+
+        const continuesCatalogRating =
+            asksForMoreResults(message) &&
+            Boolean(previousCatalogRating);
+
+        const currentResultIsbns =
+            ratingAmongCurrentResults
+                ? getLastShownIsbns(context)
+                : [];
+
+        if (
+            currentResultIsbns.length ||
+            isExplicitCatalogRatingRequest ||
+            continuesCatalogRating
+        ) {
+            const activeRating =
+                isExplicitCatalogRatingRequest
+                    ? toCatalogRatingMetadata(ratingRequest)
+                    : previousCatalogRating?.rating ||
+                      toCatalogRatingMetadata(ratingRequest);
+
+            const author =
+                explicitAuthor ||
+                (continuesCatalogRating
+                    ? previousCatalogRating?.author
+                    : ratingAmongCurrentResults
+                        ? previousRecommendation?.author
+                    : null);
+
+            const genres = requestedGenres.length
+                ? requestedGenres
+                : continuesCatalogRating
+                    ? previousCatalogRating?.genres || []
+                    : ratingAmongCurrentResults
+                        ? previousRecommendation?.genres || []
+                    : [];
+
+            const excludedIsbns =
+                continuesCatalogRating &&
+                !currentResultIsbns.length
+                    ? getRecommendationExclusions(
+                        context,
+                        'catalog_rating',
+                        {
+                            genres,
+                            author,
+                            rating: activeRating
+                        }
+                    )
+                    : [];
+
             const books =
                 await executeLibrarianTool(
-                    'get_highest_rated_genre_books',
+                    'get_catalog_books',
                     {
-                        genre: ratedGenre,
+                        author,
+                        genres,
+                        ...activeRating,
+                        includedIsbns:
+                            currentResultIsbns.length
+                                ? currentResultIsbns
+                                : undefined,
+                        excludedIsbns,
                         limit: getRequestedLimit(message, 10)
                     },
                     userId,
                     isSafeMode
                 );
 
-            context =
-                await saveGenreRecommendationContext(
+            if (author) {
+                context = await saveAuthorReference(
                     conversationId,
                     context,
-                    ratedGenre,
-                    books
+                    author
                 );
+            }
 
             context = await saveRecommendationContext(
                 conversationId,
                 context,
                 {
-                    kind: 'highest_rated_genre',
-                    genres: [ratedGenre],
+                    kind: 'catalog_rating',
+                    genres,
+                    author,
+                    rating: activeRating,
                     books: extractBooks(books)
                 }
             );
@@ -664,11 +781,17 @@ export const executeDirectRequest =
             return {
                 handled: true,
                 context,
-                results: [{
-                    tool: 'highest_rated_genre_books',
+                results: [
+                    {
+                    tool: 'catalog_rating_books',
                     data: books,
-                    genre: ratedGenre
-                }]
+                    author,
+                    genres,
+                    rating: activeRating,
+                    withinCurrentResults:
+                        currentResultIsbns.length > 0
+                    }
+                ]
             };
         }
 

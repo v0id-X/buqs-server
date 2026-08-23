@@ -16,6 +16,32 @@ const bookUrl = (isbn) =>
 const noteUrl = (id) =>
     `/notes/${encodeURIComponent(id)}`;
 
+const incrementLibrarianMetric = (metric) => {
+    const day = new Date()
+        .toISOString()
+        .slice(0, 10);
+
+    const key =
+        `metrics:librarian:${day}:${metric}`;
+
+    const pipeline = redisConnection.multi();
+
+    pipeline.incr(key);
+    pipeline.expire(
+        key,
+        60 * 60 * 24 * 30
+    );
+
+    pipeline
+        .exec()
+        .catch((error) => {
+            console.error(
+                '[Librarian Metrics] Counter update failed:',
+                error
+            );
+        });
+};
+
 const attachNotesToBooks = async (
     userId,
     books
@@ -972,6 +998,164 @@ export const getGenreBooks = async (
     );
 };
 
+export const getCatalogBooks = async (
+    userId,
+    {
+        author = null,
+        genres = [],
+        minimumRating = null,
+        minimumInclusive = false,
+        maximumRating = null,
+        maximumInclusive = false,
+        sortDirection = 'desc',
+        includedIsbns = null,
+        excludedIsbns = [],
+        limit = 10
+    } = {},
+    isSafeMode
+) => {
+    const safeLimit = Math.min(
+        Math.max(Number(limit) || 10, 1),
+        20
+    );
+
+    const safeAuthor = String(author || '')
+        .trim()
+        .slice(0, 100);
+
+    const safeGenres = Array.isArray(genres)
+        ? [...new Set(
+            genres
+                .map((genre) => String(genre || '').trim().toLowerCase())
+                .filter(Boolean)
+        )].slice(0, 5)
+        : [];
+
+    const safeIncluded = Array.isArray(includedIsbns)
+        ? [...new Set(
+            includedIsbns
+                .map((isbn) => String(isbn || '').trim())
+                .filter(Boolean)
+        )].slice(-100)
+        : null;
+
+    const safeExcluded = Array.isArray(excludedIsbns)
+        ? [...new Set(
+            excludedIsbns
+                .map((isbn) => String(isbn || '').trim())
+                .filter(Boolean)
+        )].slice(-100)
+        : [];
+
+    if (Array.isArray(safeIncluded) && !safeIncluded.length) {
+        return [];
+    }
+
+    const values = [userId];
+    const addValue = (value) => {
+        values.push(value);
+        return `$${values.length}`;
+    };
+
+    const conditions = [];
+
+    if (safeAuthor) {
+        const authorValue = addValue(`%${safeAuthor}%`);
+        conditions.push(`b.author ILIKE ${authorValue}`);
+    }
+
+    if (safeGenres.length) {
+        const genresValue = addValue(safeGenres);
+        conditions.push(`
+            EXISTS (
+                SELECT 1
+                FROM unnest(b.genres) AS genre
+                WHERE LOWER(genre) = ANY(${genresValue}::text[])
+            )
+        `);
+    }
+
+    const safeMinimum = Number(minimumRating);
+
+    if (
+        Number.isFinite(safeMinimum) &&
+        safeMinimum >= 1 &&
+        safeMinimum <= 5
+    ) {
+        const minimumValue = addValue(safeMinimum);
+        conditions.push(
+            `COALESCE(bs.average_rating, 0) ${minimumInclusive ? '>=' : '>'} ${minimumValue}::numeric`
+        );
+    }
+
+    const safeMaximum = Number(maximumRating);
+
+    if (
+        Number.isFinite(safeMaximum) &&
+        safeMaximum >= 1 &&
+        safeMaximum <= 5
+    ) {
+        const maximumValue = addValue(safeMaximum);
+        conditions.push(
+            `COALESCE(bs.average_rating, 0) ${maximumInclusive ? '<=' : '<'} ${maximumValue}::numeric`
+        );
+    }
+
+    if (Array.isArray(safeIncluded)) {
+        const includedValue = addValue(safeIncluded);
+        conditions.push(`b.isbn = ANY(${includedValue}::text[])`);
+    }
+
+    if (safeExcluded.length) {
+        const excludedValue = addValue(safeExcluded);
+        conditions.push(`NOT (b.isbn = ANY(${excludedValue}::text[]))`);
+    }
+
+    if (isSafeMode) {
+        conditions.push('b.is_adult = false');
+    }
+
+    const direction = sortDirection === 'asc'
+        ? 'ASC'
+        : 'DESC';
+
+    const limitValue = addValue(safeLimit);
+
+    const result = await pool.query(
+        `
+        SELECT
+            b.isbn,
+            b.title,
+            b.author,
+            b.description,
+            b.genres,
+            b.cover_image,
+            b.published_year,
+            COALESCE(bs.average_rating, 0) AS average_rating,
+            ul.status AS user_library_status,
+            r.rating AS user_personal_rating
+        FROM books b
+        LEFT JOIN book_stats bs
+            ON bs.isbn = b.isbn
+        LEFT JOIN user_library ul
+            ON ul.isbn = b.isbn
+           AND ul.user_id = $1
+        LEFT JOIN ratings r
+            ON r.isbn = b.isbn
+           AND r.user_id = $1
+        ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+        ORDER BY
+            COALESCE(bs.average_rating, 0) ${direction},
+            b.published_year DESC NULLS LAST,
+            b.isbn DESC
+        LIMIT ${limitValue}
+        `,
+        values
+    );
+
+    return enrichBooks(userId, result.rows);
+};
+
 export const getHighestRatedGenreBooks = async (
     userId,
     genre,
@@ -1043,6 +1227,10 @@ export const getTrendingBooks = async (
             const parsed = JSON.parse(cached);
 
             if (Array.isArray(parsed) && parsed.length) {
+                incrementLibrarianMetric(
+                    'trending_cache_hit'
+                );
+
                 return enrichBooks(
                     userId,
                     parsed
@@ -1062,6 +1250,10 @@ export const getTrendingBooks = async (
             error
         );
     }
+
+    incrementLibrarianMetric(
+        'trending_cache_miss'
+    );
 
     const conditions = [
         `NOT (b.isbn = ANY($2::text[]))`

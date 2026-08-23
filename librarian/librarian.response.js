@@ -80,6 +80,43 @@ const createNotesResponse = (
     };
 };
 
+const formatRatingFilter = (rating = {}) => {
+    const minimumRating = Number(rating.minimumRating);
+    const maximumRating = Number(rating.maximumRating);
+
+    if (Number.isFinite(minimumRating)) {
+        return `with an average rating ${rating.minimumInclusive ? 'of at least' : 'above'} ${minimumRating}`;
+    }
+
+    if (Number.isFinite(maximumRating)) {
+        return `with an average rating ${rating.maximumInclusive ? 'of at most' : 'below'} ${maximumRating}`;
+    }
+
+    return rating.sortDirection === 'asc'
+        ? 'with the lowest average ratings'
+        : 'with the highest average ratings';
+};
+
+const formatCatalogRatingScope = (result) => {
+    if (result.withinCurrentResults) {
+        return 'from the books above';
+    }
+
+    if (result.author) {
+        return `by ${result.author}`;
+    }
+
+    const genres = Array.isArray(result.genres)
+        ? result.genres.filter(Boolean)
+        : [];
+
+    if (genres.length) {
+        return `in ${genres.join(' and ')}`;
+    }
+
+    return 'in the BUQS catalog';
+};
+
 export const buildDeterministicResponse = ({
     message,
     results,
@@ -94,6 +131,52 @@ export const buildDeterministicResponse = ({
 
     const data =
         result.data;
+
+    if (result.tool === 'agent_clarification') {
+        return {
+            message:
+                data?.message ||
+                'Could you rephrase that with a book title, author, genre, or rating constraint?',
+            recommendations: []
+        };
+    }
+
+    if (
+        result.tool === 'catalog_rating_books' ||
+        result.tool === 'get_catalog_books'
+    ) {
+        const books = extractBooks(data);
+        const rating = result.rating || result.query || {};
+        const scope = formatCatalogRatingScope({
+            ...result,
+            author:
+                result.author ||
+                result.query?.author ||
+                null,
+            genres:
+                result.genres ||
+                result.query?.genres ||
+                [],
+            withinCurrentResults:
+                Boolean(
+                    result.withinCurrentResults ||
+                    result.query?.withinLastResults
+                )
+        });
+        const filter = formatRatingFilter(rating);
+
+        return {
+            message: books.length
+                ? `Here are books ${scope} ${filter}:`
+                : `I couldn't find books ${scope} ${filter}.`,
+            recommendations: books.map((book) =>
+                toRecommendation(
+                    book,
+                    `Average rating: ${book.average_rating ?? 0}.`
+                )
+            )
+        };
+    }
 
     if (result.tool === 'highest_rated_author_books') {
         const books =

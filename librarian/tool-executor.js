@@ -8,6 +8,7 @@
     getSimilarBooks,
     getForYouBooks,
     getGenreBooks,
+    getCatalogBooks,
     getHighestRatedGenreBooks,
     getTrendingBooks,
     getUserNotes
@@ -82,6 +83,24 @@ export const executeLibrarianTool =
                     isSafeMode,
                     args.excludedIsbns,
                     args.limit
+                );
+
+            case 'get_catalog_books':
+                return getCatalogBooks(
+                    userId,
+                    {
+                        author: args.author,
+                        genres: args.genres,
+                        minimumRating: args.minimumRating,
+                        minimumInclusive: args.minimumInclusive,
+                        maximumRating: args.maximumRating,
+                        maximumInclusive: args.maximumInclusive,
+                        sortDirection: args.sortDirection,
+                        includedIsbns: args.includedIsbns,
+                        excludedIsbns: args.excludedIsbns,
+                        limit: args.limit
+                    },
+                    isSafeMode
                 );
 
             case 'get_trending_books':

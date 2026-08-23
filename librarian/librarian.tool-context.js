@@ -6,7 +6,8 @@ import {
 
 import {
     saveBookReference,
-    saveAuthorReference
+    saveAuthorReference,
+    saveRecommendationContext
 } from './librarian.reference.js';
 
 export const updateContextFromToolResult =
@@ -14,7 +15,8 @@ export const updateContextFromToolResult =
         conversationId,
         context,
         toolName,
-        data
+        data,
+        toolArgs = {}
     }) => {
         let updatedContext =
             context || {};
@@ -106,6 +108,50 @@ export const updateContextFromToolResult =
                         conversationId,
                         updatedContext,
                         books[0].author
+                    );
+            }
+        }
+
+        if (
+            toolName ===
+            'get_catalog_books'
+        ) {
+            const books = extractBooks(data);
+
+            updatedContext =
+                await saveRecommendationContext(
+                    conversationId,
+                    updatedContext,
+                    {
+                        kind: 'catalog_rating',
+                        author: toolArgs.author || null,
+                        genres: Array.isArray(toolArgs.genres)
+                            ? toolArgs.genres
+                            : [],
+                        rating: {
+                            sortDirection:
+                                toolArgs.sortDirection === 'asc'
+                                    ? 'asc'
+                                    : 'desc',
+                            minimumRating:
+                                toolArgs.minimumRating ?? null,
+                            minimumInclusive:
+                                Boolean(toolArgs.minimumInclusive),
+                            maximumRating:
+                                toolArgs.maximumRating ?? null,
+                            maximumInclusive:
+                                Boolean(toolArgs.maximumInclusive)
+                        },
+                        books
+                    }
+                );
+
+            if (toolArgs.author) {
+                updatedContext =
+                    await saveAuthorReference(
+                        conversationId,
+                        updatedContext,
+                        toolArgs.author
                     );
             }
         }
