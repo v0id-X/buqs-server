@@ -16,6 +16,36 @@ const bookUrl = (isbn) =>
 const noteUrl = (id) =>
     `/notes/${encodeURIComponent(id)}`;
 
+export const expandGenreAliases = (genres) => {
+    const list = Array.isArray(genres) ? genres : (genres ? [genres] : []);
+    const expanded = new Set();
+
+    for (const g of list) {
+        if (!g) continue;
+        const norm = String(g).trim().toLowerCase();
+        expanded.add(norm);
+
+        if (norm === 'dystopian' || norm === 'dystopia') {
+            expanded.add('dystopian');
+            expanded.add('dystopia');
+        } else if (norm === 'sci-fi' || norm === 'scifi' || norm === 'science fiction') {
+            expanded.add('sci-fi');
+            expanded.add('science fiction');
+        } else if (norm === 'self-help' || norm === 'self help') {
+            expanded.add('self-help');
+            expanded.add('self help');
+        } else if (norm === 'post-apocalyptic' || norm === 'post apocalyptic') {
+            expanded.add('post-apocalyptic');
+            expanded.add('post apocalyptic');
+        } else if (norm === 'ya' || norm === 'young adult') {
+            expanded.add('ya');
+            expanded.add('young adult');
+        }
+    }
+
+    return [...expanded];
+};
+
 const incrementLibrarianMetric = (metric) => {
     const day = new Date()
         .toISOString()
@@ -240,47 +270,93 @@ export const getUserProfile = async (
     };
 };
 
-export const getReadingHistory = async (
+export const getUserLibrary = async (
     userId,
-    limit = 10
+    args = {}
 ) => {
+    let limit = 10;
+    let status = null;
+    let query = null;
+
+    if (args && typeof args === 'object') {
+        limit = args.limit ?? 10;
+        status = args.status ?? null;
+        query = args.query ?? null;
+    } else if (typeof args === 'number') {
+        limit = args;
+    }
+
     const safeLimit = Math.min(
-        Math.max(
-            Number(limit) || 10,
-            1
-        ),
+        Math.max(Number(limit) || 10, 1),
         20
     );
 
-    const result =
-        await pool.query(
-            `
-            SELECT
-                b.isbn,
-                b.title,
-                b.author,
-                b.genres,
-                b.cover_image,
-                ul.status,
-                ul.updated_at
-            FROM user_library ul
-            JOIN books b
-                ON b.isbn = ul.isbn
-            WHERE ul.user_id = $1
-            ORDER BY
-                ul.updated_at DESC
-            LIMIT $2
-            `,
-            [
-                userId,
-                safeLimit
-            ]
-        );
+    const conditions = ['ul.user_id = $1'];
+    const values = [userId];
+
+    let normalizedStatus = status ? String(status).toLowerCase().trim() : null;
+    if (normalizedStatus === 'currently reading' || normalizedStatus === 'currently_reading') {
+        normalizedStatus = 'reading';
+    } else if (normalizedStatus === 'read' || normalizedStatus === 'completed') {
+        normalizedStatus = 'finished';
+    } else if (normalizedStatus === 'to-read' || normalizedStatus === 'to_read') {
+        normalizedStatus = 'wishlist';
+    }
+
+    if (normalizedStatus && ['wishlist', 'reading', 'finished'].includes(normalizedStatus)) {
+        values.push(normalizedStatus);
+        conditions.push(`ul.status = $${values.length}`);
+    }
+
+    if (query && String(query).trim()) {
+        values.push(`%${String(query).trim()}%`);
+        conditions.push(`(b.title ILIKE $${values.length} OR b.author ILIKE $${values.length})`);
+    }
+
+    values.push(safeLimit);
+
+    const result = await pool.query(
+        `
+        SELECT
+            b.isbn,
+            b.title,
+            b.author,
+            b.description,
+            b.genres,
+            b.cover_image,
+            b.published_year,
+            COALESCE(bs.average_rating, 0) AS average_rating,
+            ul.status,
+            ul.status AS user_library_status,
+            ul.updated_at,
+            r.rating AS user_personal_rating
+        FROM user_library ul
+        JOIN books b ON b.isbn = ul.isbn
+        LEFT JOIN book_stats bs ON bs.isbn = b.isbn
+        LEFT JOIN ratings r ON r.isbn = b.isbn AND r.user_id = $1
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY ul.updated_at DESC
+        LIMIT $${values.length}
+        `,
+        values
+    );
 
     return enrichBooks(
         userId,
         result.rows
     );
+};
+
+export const getReadingHistory = async (
+    userId,
+    limitOrArgs = 10,
+    status = null,
+    query = null
+) => {
+    if (limitOrArgs && typeof limitOrArgs === 'object') {
+        return getUserLibrary(userId, limitOrArgs);
+    }
+    return getUserLibrary(userId, { limit: limitOrArgs, status, query });
 };
 
 export const getUserRatings = async (
@@ -701,19 +777,11 @@ export const getForYouBooks = async (
 
     const authorWeights = affinity.author_weights || {};
 
-    const requestedGenres = [
+    const rawGenres = [
         ...(Array.isArray(genres) ? genres : []),
         ...(typeof genre === 'string' && genre.trim() ? [genre] : [])
-    ]
-        .map((value) => String(value || '').trim())
-        .filter(Boolean)
-        .filter(
-            (value, index, values) =>
-                values.findIndex(
-                    (item) => item.toLowerCase() === value.toLowerCase()
-                ) === index
-        )
-        .slice(0, 5);
+    ];
+    const requestedGenres = expandGenreAliases(rawGenres).slice(0, 8);
 
     const hasExplicitGenre = requestedGenres.length > 0;
 
@@ -904,19 +972,7 @@ export const getGenreBooks = async (
     excludedIsbns = [],
     limit = 5
 ) => {
-    const requestedGenres = Array.isArray(genres)
-        ? genres
-            .map((genre) => String(genre || '').trim())
-            .filter(Boolean)
-            .filter(
-                (genre, index, values) =>
-                    values.findIndex(
-                        (value) =>
-                            value.toLowerCase() === genre.toLowerCase()
-                    ) === index
-            )
-            .slice(0, 5)
-        : [];
+    const requestedGenres = expandGenreAliases(genres).slice(0, 8);
 
     if (!requestedGenres.length) {
         return [];
@@ -1023,13 +1079,7 @@ export const getCatalogBooks = async (
         .trim()
         .slice(0, 100);
 
-    const safeGenres = Array.isArray(genres)
-        ? [...new Set(
-            genres
-                .map((genre) => String(genre || '').trim().toLowerCase())
-                .filter(Boolean)
-        )].slice(0, 5)
-        : [];
+    const safeGenres = expandGenreAliases(genres).slice(0, 8);
 
     const safeIncluded = Array.isArray(includedIsbns)
         ? [...new Set(
@@ -1175,8 +1225,7 @@ export const getHighestRatedGenreBooks = async (
     ];
 
     if (isSafeMode) conditions.push('b.is_adult = false');
-    // Always reference $2. PostgreSQL cannot infer its type when an empty
-    // exclusion list leaves the placeholder unused on the first request.
+    
     conditions.push(
         `NOT (b.isbn = ANY($2::text[]))`
     );
@@ -1419,4 +1468,13 @@ export const getUserNotes = async (
     );
 
     return notes;
+};
+
+export const searchGeneralKnowledge = async (
+    query,
+    context
+) => {
+    const { generalKnowledge } = await import('./groqClient.js');
+
+    return generalKnowledge(query, context);
 };

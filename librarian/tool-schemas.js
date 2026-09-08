@@ -83,12 +83,60 @@ export const librarianTools = [
         type: 'function',
         function: {
             name:
+                'get_user_library',
+            description:
+                "Inspect or search the authenticated user's library and reading lists. Use this when the user asks what books are in their library, what they are currently reading, what is on their wishlist, what they have finished, or whether a specific book is in their library.",
+            parameters: {
+                type: 'object',
+                properties: {
+                    status: {
+                        type: 'string',
+                        enum: [
+                            'all',
+                            'reading',
+                            'wishlist',
+                            'finished'
+                        ],
+                        description: "Filter by status: 'reading' (currently reading), 'wishlist' (want to read), 'finished' (completed), or 'all' to check everything."
+                    },
+                    query: {
+                        type: 'string',
+                        description: "Search for a specific book title or author inside the user's library (e.g. 'Dune', '1984', 'George Orwell')."
+                    },
+                    limit: {
+                        type: 'integer',
+                        minimum: 1,
+                        maximum: 20
+                    }
+                },
+                additionalProperties:
+                    false
+            }
+        }
+    },
+
+    {
+        type: 'function',
+        function: {
+            name:
                 'get_reading_history',
             description:
                 'Get the authenticated users recent reading/library activity. Only use this when the user explicitly asks about books they have read, finished, are reading, or their reading history.',
             parameters: {
                 type: 'object',
                 properties: {
+                    status: {
+                        type: 'string',
+                        enum: [
+                            'all',
+                            'reading',
+                            'wishlist',
+                            'finished'
+                        ]
+                    },
+                    query: {
+                        type: 'string'
+                    },
                     limit: {
                         type: 'integer',
                         minimum: 1,
@@ -283,6 +331,36 @@ export const librarianTools = [
                         maximum: 20
                     }
                 },
+                additionalProperties:
+                    false
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name:
+                'search_general_knowledge',
+            description:
+                'Search for book recommendations using general AI knowledge when BUQS catalog tools return no results. ONLY call this tool AFTER you have already tried relevant BUQS catalog tools (search_books, get_catalog_books, etc.) and they returned empty or no matching results. Results from this tool are NOT from the BUQS catalog and should be clearly marked as AI-sourced.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: {
+                        type: 'string',
+                        minLength: 2,
+                        maxLength: 200,
+                        description: 'The book search query or recommendation request'
+                    },
+                    context: {
+                        type: 'string',
+                        maxLength: 500,
+                        description: 'Additional context about what the user is looking for'
+                    }
+                },
+                required: [
+                    'query'
+                ],
                 additionalProperties:
                     false
             }

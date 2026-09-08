@@ -1,8 +1,17 @@
-import Groq from 'groq-sdk';
-import 'dotenv/config';
+import {
+    chatCompletion,
+    generalKnowledge,
+    PROVIDERS,
+    CascadeExhaustionError,
+    getLastServedTelemetry
+} from '../utils/llmGateway.js';
 
-export const groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY
-});
+export const GROQ_MODEL = PROVIDERS[0].model;
 
-export const GROQ_MODEL = 'openai/gpt-oss-20b';
+export {
+    chatCompletion,
+    generalKnowledge,
+    PROVIDERS,
+    CascadeExhaustionError,
+    getLastServedTelemetry
+};

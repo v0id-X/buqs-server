@@ -10,8 +10,7 @@ import {
 } from './librarian.parsers.js';
 
 import {
-    executeDeterministicBookLookup,
-    executeDirectRequest
+    executeFastPath
 } from './librarian.direct.js';
 
 import {
@@ -24,8 +23,9 @@ import {
 } from './librarian.response.js';
 
 import {
-    createDisambiguationResponse
-} from './librarian.reference.js';
+    getLastServedTelemetry,
+    CascadeExhaustionError
+} from '../utils/llmGateway.js';
 
 const saveResponse = async (
     conversationId,
@@ -138,147 +138,66 @@ export const generateLibrarianResponse =
                     initialContext
                 );
 
-            let route =
-                'deterministic_book_lookup';
+            let route = 'fast_path';
+            let context = initialContext;
+            let results;
 
-            const deterministicBook =
-                await executeDeterministicBookLookup({
+            const fastPath =
+                await executeFastPath({
                     userId,
                     message:
                         safeMessage,
                     conversationId,
-                    context:
-                        initialContext,
+                    context,
                     isSafeMode
                 });
 
-            if (
-                deterministicBook.disambiguation
-            ) {
-                await saveResponse(
-                    conversationId,
-                    history,
-                    safeMessage,
-                    deterministicBook.disambiguation
-                );
-
-                return attachLibrarianMetrics(
-                    deterministicBook.disambiguation,
-                    {
-                        route:
-                            'deterministic_book_lookup_disambiguation',
-                        previousShownIsbns
-                    }
-                );
-            }
-
-            let context =
-                deterministicBook.context ||
-                initialContext;
-
-            let results;
-
-            if (
-                deterministicBook.handled
-            ) {
+            if (fastPath.handled) {
                 route = getRouteName(
-                    'deterministic_book_lookup',
-                    deterministicBook.results
+                    'fast_path',
+                    fastPath.results
                 );
+
+                context =
+                    fastPath.context ||
+                    context;
 
                 results =
-                    deterministicBook.results;
+                    fastPath.results;
             } else {
-                const direct =
-                    await executeDirectRequest({
+                route = 'agent';
+
+                const agent =
+                    await executeAgentRequest({
                         userId,
                         message:
                             safeMessage,
                         conversationId,
+                        history,
                         context,
                         isSafeMode
                     });
 
+                results =
+                    agent.results;
+
                 context =
-                    direct.context ||
+                    agent.context ||
                     context;
 
-                if (
-                    direct.handled
-                ) {
-                    route = getRouteName(
-                        'direct',
-                        direct.results
-                    );
-
-                    results =
-                        direct.results;
-                } else {
-                    route = 'agent_fallback';
-
-                    const agent =
-                        await executeAgentRequest({
-                            userId,
-                            message:
-                                safeMessage,
-                            conversationId,
-                            history,
-                            context,
-                            isSafeMode
-                        });
-
-                    results =
-                        agent.results;
-
-                    context =
-                        agent.context ||
-                        context;
-                }
-            }
-
-            const searchResults =
-                Array.isArray(results)
-                    ? results
-                        .filter(
-                            (result) =>
-                                result.tool ===
-                                'search_books' &&
-                                !result.author
-                        )
-                        .flatMap(
-                            (result) =>
-                                Array.isArray(
-                                    result.data
-                                )
-                                    ? result.data
-                                    : []
-                        )
-                    : [];
-
-            const disambiguation =
-                createDisambiguationResponse(
-                    searchResults
-                );
-
-            if (
-                disambiguation
-            ) {
-                await saveResponse(
-                    conversationId,
-                    history,
-                    safeMessage,
-                    disambiguation
-                );
-
-                return attachLibrarianMetrics(
-                    disambiguation,
-                    {
-                        route:
-                            `${route}_disambiguation`,
-                        previousShownIsbns
-                    }
+                route = getRouteName(
+                    'agent',
+                    results
                 );
             }
+
+            const hasAiKnowledge =
+                Array.isArray(results) &&
+                results.some(
+                    (r) =>
+                        r.tool === 'search_general_knowledge' ||
+                        r.source === 'ai_knowledge'
+                );
 
             const deterministic =
                 buildDeterministicResponse({
@@ -288,13 +207,42 @@ export const generateLibrarianResponse =
                     context
                 });
 
-            const finalResponse =
-                deterministic ||
-                await createFinalResponse(
-                    safeMessage,
-                    results,
-                    conversationId
-                );
+            let finalResponse;
+
+            if (deterministic) {
+                finalResponse = deterministic;
+            } else {
+                finalResponse =
+                    await createFinalResponse(
+                        safeMessage,
+                        results,
+                        conversationId
+                    );
+            }
+
+            if (hasAiKnowledge && finalResponse) {
+                finalResponse.source = 'ai_knowledge';
+
+                if (Array.isArray(finalResponse.recommendations)) {
+                    for (const rec of finalResponse.recommendations) {
+                        if (!rec.source) {
+                            rec.source = 'ai_knowledge';
+                        }
+                    }
+                }
+            }
+
+            if (!finalResponse.source) {
+                finalResponse.source = 'catalog';
+            }
+
+            if (Array.isArray(finalResponse.recommendations)) {
+                for (const rec of finalResponse.recommendations) {
+                    if (!rec.source) {
+                        rec.source = 'catalog';
+                    }
+                }
+            }
 
             await saveResponse(
                 conversationId,
@@ -303,11 +251,38 @@ export const generateLibrarianResponse =
                 finalResponse
             );
 
+            const telemetry = getLastServedTelemetry();
+
             return attachLibrarianMetrics(
                 finalResponse,
                 {
                     route,
-                    previousShownIsbns
+                    previousShownIsbns,
+                    provider: telemetry.provider,
+                    model: telemetry.model
+                }
+            );
+        } catch (error) {
+            if (error instanceof CascadeExhaustionError || error.name === 'CascadeExhaustionError') {
+                throw error;
+            }
+
+            console.error(
+                `[Librarian:${conversationId}] Fatal error:`,
+                error
+            );
+
+            return attachLibrarianMetrics(
+                {
+                    message:
+                        "I'm having trouble right now. Please try again in a moment.",
+                    recommendations: [],
+                    notes: [],
+                    source: 'catalog'
+                },
+                {
+                    route: 'error',
+                    previousShownIsbns: []
                 }
             );
         } finally {

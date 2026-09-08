@@ -7,7 +7,8 @@ import {
 import {
     saveBookReference,
     saveAuthorReference,
-    saveRecommendationContext
+    saveRecommendationContext,
+    saveGenreRecommendationContext
 } from './librarian.reference.js';
 
 export const updateContextFromToolResult =
@@ -71,6 +72,18 @@ export const updateContextFromToolResult =
         ) {
             const books =
                 extractBooks(data);
+
+            if (books.length > 0) {
+                updatedContext =
+                    await saveRecommendationContext(
+                        conversationId,
+                        updatedContext,
+                        {
+                            kind: 'similar',
+                            books
+                        }
+                    );
+            }
 
             if (
                 books.length === 1
@@ -154,6 +167,134 @@ export const updateContextFromToolResult =
                         toolArgs.author
                     );
             }
+        }
+
+        if (
+            toolName ===
+            'get_for_you_books'
+        ) {
+            const books = extractBooks(data);
+
+            if (books.length > 0) {
+                const genre =
+                    toolArgs.genre ||
+                    (Array.isArray(toolArgs.genres) && toolArgs.genres[0]) ||
+                    null;
+
+                if (genre) {
+                    updatedContext =
+                        await saveGenreRecommendationContext(
+                            conversationId,
+                            updatedContext,
+                            genre,
+                            books
+                        );
+                }
+
+                updatedContext =
+                    await saveRecommendationContext(
+                        conversationId,
+                        updatedContext,
+                        {
+                            kind: 'for_you',
+                            author: toolArgs.author || null,
+                            genres: genre ? [genre] : [],
+                            books
+                        }
+                    );
+            }
+        }
+
+        if (
+            toolName ===
+            'get_genre_books'
+        ) {
+            const books = extractBooks(data);
+
+            if (books.length > 0) {
+                const genre =
+                    (Array.isArray(toolArgs.genres) && toolArgs.genres[0]) ||
+                    null;
+
+                if (genre) {
+                    updatedContext =
+                        await saveGenreRecommendationContext(
+                            conversationId,
+                            updatedContext,
+                            genre,
+                            books
+                        );
+                }
+
+                updatedContext =
+                    await saveRecommendationContext(
+                        conversationId,
+                        updatedContext,
+                        {
+                            kind: 'genre',
+                            genres: Array.isArray(toolArgs.genres) ? toolArgs.genres : [],
+                            books
+                        }
+                    );
+            }
+        }
+
+        if (
+            toolName ===
+            'get_highest_rated_genre_books'
+        ) {
+            const books = extractBooks(data);
+
+            if (books.length > 0) {
+                const genre = toolArgs.genre || null;
+
+                if (genre) {
+                    updatedContext =
+                        await saveGenreRecommendationContext(
+                            conversationId,
+                            updatedContext,
+                            genre,
+                            books
+                        );
+                }
+
+                updatedContext =
+                    await saveRecommendationContext(
+                        conversationId,
+                        updatedContext,
+                        {
+                            kind: 'highest_rated_genre',
+                            genres: genre ? [genre] : [],
+                            books
+                        }
+                    );
+            }
+        }
+
+        if (
+            toolName ===
+            'get_trending_books'
+        ) {
+            const books = extractBooks(data);
+
+            if (books.length > 0) {
+                updatedContext =
+                    await saveRecommendationContext(
+                        conversationId,
+                        updatedContext,
+                        {
+                            kind: 'trending',
+                            books
+                        }
+                    );
+            }
+        }
+
+        if (
+            toolName ===
+            'search_general_knowledge'
+        ) {
+            return updatedContext;
         }
 
         return updatedContext;

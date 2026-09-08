@@ -111,3 +111,50 @@ export const findNoteForBook = (notes, book) => {
         );
     }) || null;
 };
+
+export const compactBookForLlm = (b) => {
+    if (!b || typeof b !== 'object') return b;
+    const rawStatus = b.status || b.user_library_status;
+    let statusLabel = null;
+    if (rawStatus) {
+        const s = String(rawStatus).toLowerCase().trim();
+        if (s === 'reading' || s === 'currently reading' || s === 'currently_reading') {
+            statusLabel = 'currently reading';
+        } else if (s === 'wishlist' || s === 'to-read') {
+            statusLabel = 'wishlist';
+        } else if (s === 'finished' || s === 'read') {
+            statusLabel = 'finished';
+        }
+    }
+
+    return {
+        isbn: b.isbn || b.book_isbn,
+        title: b.title || b.book_title,
+        author: b.author,
+        genre: b.genre || b.genres,
+        rating: b.average_rating || b.rating || b.global_rating,
+        summary: (b.description || b.summary || '').slice(0, 180),
+        ...(statusLabel ? { status: statusLabel } : {})
+    };
+};
+
+export const compactToolResultForLlm = (result) => {
+    if (!result || typeof result !== 'object') return result;
+
+    if (Array.isArray(result)) {
+        return result.slice(0, 6).map(compactBookForLlm);
+    }
+
+    if (Array.isArray(result.books)) {
+        return {
+            ...result,
+            books: result.books.slice(0, 6).map(compactBookForLlm)
+        };
+    }
+
+    if (result.isbn && result.title) {
+        return compactBookForLlm(result);
+    }
+
+    return result;
+};

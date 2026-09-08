@@ -1,7 +1,6 @@
 
 import {
-    groq,
-    GROQ_MODEL
+    chatCompletion
 } from './groqClient.js';
 
 import {
@@ -18,11 +17,13 @@ import {
     extractBook,
     extractBooks,
     toRecommendation,
-    getNoteContent
+    getNoteContent,
+    compactToolResultForLlm
 } from './librarian.book-utils.js';
 
 import {
-    asksForLastFinishedBook
+    asksForLastFinishedBook,
+    normalizeTitle
 } from './librarian.parsers.js';
 
 const createNotesResponse = (
@@ -38,7 +39,8 @@ const createNotesResponse = (
             message:
                 "You don't have any notes matching that request.",
             recommendations: [],
-            notes: []
+            notes: [],
+            source: 'catalog'
         };
     }
 
@@ -76,45 +78,9 @@ const createNotesResponse = (
                 title: note.title || 'Untitled note',
                 content: getNoteContent(note),
                 noteUrl: note.noteUrl
-            }))
+            })),
+        source: 'catalog'
     };
-};
-
-const formatRatingFilter = (rating = {}) => {
-    const minimumRating = Number(rating.minimumRating);
-    const maximumRating = Number(rating.maximumRating);
-
-    if (Number.isFinite(minimumRating)) {
-        return `with an average rating ${rating.minimumInclusive ? 'of at least' : 'above'} ${minimumRating}`;
-    }
-
-    if (Number.isFinite(maximumRating)) {
-        return `with an average rating ${rating.maximumInclusive ? 'of at most' : 'below'} ${maximumRating}`;
-    }
-
-    return rating.sortDirection === 'asc'
-        ? 'with the lowest average ratings'
-        : 'with the highest average ratings';
-};
-
-const formatCatalogRatingScope = (result) => {
-    if (result.withinCurrentResults) {
-        return 'from the books above';
-    }
-
-    if (result.author) {
-        return `by ${result.author}`;
-    }
-
-    const genres = Array.isArray(result.genres)
-        ? result.genres.filter(Boolean)
-        : [];
-
-    if (genres.length) {
-        return `in ${genres.join(' and ')}`;
-    }
-
-    return 'in the BUQS catalog';
 };
 
 export const buildDeterministicResponse = ({
@@ -136,258 +102,9 @@ export const buildDeterministicResponse = ({
         return {
             message:
                 data?.message ||
-                'Could you rephrase that with a book title, author, genre, or rating constraint?',
-            recommendations: []
-        };
-    }
-
-    if (
-        result.tool === 'catalog_rating_books' ||
-        result.tool === 'get_catalog_books'
-    ) {
-        const books = extractBooks(data);
-        const rating = result.rating || result.query || {};
-        const scope = formatCatalogRatingScope({
-            ...result,
-            author:
-                result.author ||
-                result.query?.author ||
-                null,
-            genres:
-                result.genres ||
-                result.query?.genres ||
-                [],
-            withinCurrentResults:
-                Boolean(
-                    result.withinCurrentResults ||
-                    result.query?.withinLastResults
-                )
-        });
-        const filter = formatRatingFilter(rating);
-
-        return {
-            message: books.length
-                ? `Here are books ${scope} ${filter}:`
-                : `I couldn't find books ${scope} ${filter}.`,
-            recommendations: books.map((book) =>
-                toRecommendation(
-                    book,
-                    `Average rating: ${book.average_rating ?? 0}.`
-                )
-            )
-        };
-    }
-
-    if (result.tool === 'highest_rated_author_books') {
-        const books =
-            extractBooks(data);
-
-        return {
-            message: books.length
-                ? `Here are the highest-rated books by ${result.author} in the BUQS catalog:`
-                : `I couldn't find rated books by ${result.author} in the BUQS catalog.`,
-            recommendations: books.map((book) =>
-                toRecommendation(
-                    book,
-                    book.average_rating != null
-                        ? `Average rating: ${book.average_rating}.`
-                        : 'Available in the BUQS catalog.'
-                )
-            )
-        };
-    }
-
-    if (result.tool === 'highest_rated_genre_books') {
-        const books = extractBooks(data);
-
-        return {
-            message: books.length
-                ? `Here are the highest-rated ${result.genre} books in the BUQS catalog:`
-                : `I couldn't find rated ${result.genre} books in the BUQS catalog.`,
-            recommendations: books.map((book) =>
-                toRecommendation(
-                    book,
-                    `Average rating: ${book.average_rating ?? 0}.`
-                )
-            )
-        };
-    }
-
-    if (result.tool === 'genre_recommendation_books') {
-        const books = extractBooks(data);
-        const genres = Array.isArray(result.genres)
-            ? result.genres.filter(Boolean)
-            : [];
-        const genreLabel = genres.length > 1
-            ? genres.join(' and ')
-            : genres[0] || 'selected';
-
-        return {
-            message: books.length
-                ? `Here are some ${genreLabel} books from the BUQS catalog:`
-                : `I couldn't find more ${genreLabel} books in the BUQS catalog.`,
-            recommendations: books.map((book) =>
-                toRecommendation(
-                    book,
-                    'Selected from the BUQS catalog.'
-                )
-            )
-        };
-    }
-
-    if (result.tool === 'author_recommendation_books') {
-        const books = extractBooks(data);
-
-        return {
-            message: books.length
-                ? `Here are more books by ${result.author} in the BUQS catalog:`
-                : `I couldn't find more books by ${result.author} in the BUQS catalog.`,
-            recommendations: books.map((book) =>
-                toRecommendation(
-                    book,
-                    `By ${book.author || result.author}.`
-                )
-            )
-        };
-    }
-
-    if (result.tool === 'book_taste_check') {
-        const book =
-            extractBook(data?.book);
-
-        if (!book) {
-            return {
-                message: "I couldn't find that book in the BUQS catalog.",
-                recommendations: []
-            };
-        }
-
-        const preferredGenres =
-            Array.isArray(data?.profile?.topGenres)
-                ? data.profile.topGenres
-                : [];
-
-        const bookGenres =
-            Array.isArray(book.genres)
-                ? book.genres
-                : [];
-
-        const matchingGenres =
-            bookGenres.filter((genre) =>
-                preferredGenres.some(
-                    (preferred) =>
-                        String(preferred).toLowerCase() ===
-                        String(genre).toLowerCase()
-                )
-            );
-
-        const isFit =
-            matchingGenres.length > 0;
-
-        return {
-            message: isFit
-                ? `Yes — "${book.title}" looks like a good fit for your current reading taste, especially because you enjoy ${matchingGenres.join(', ')}.`
-                : preferredGenres.length
-                    ? `"${book.title}" may be a change of pace. Its genres do not overlap with your strongest current preferences: ${preferredGenres.join(', ')}.`
-                    : `I found "${book.title}", but you do not have enough reading-preference data yet to judge the fit.`,
-            recommendations: [
-                toRecommendation(
-                    book,
-                    isFit
-                        ? `Matches your interest in ${matchingGenres.join(', ')}.`
-                        : 'Compare this with your current reading preferences.'
-                )
-            ]
-        };
-    }
-
-    if (
-        result.tool ===
-        'personalized_similar_books'
-    ) {
-        const books =
-            extractBooks(data);
-
-        if (!books.length) {
-            return {
-                message:
-                    "I couldn't find personalized recommendations from your reading history right now.",
-                recommendations: []
-            };
-        }
-
-        return {
-            message:
-                result.sourceReason
-                    ? `Based on your reading, especially "${result.sourceBook?.title}", here are some books you might enjoy:`
-                    : 'Here are some books you might enjoy based on your reading history:',
-            recommendations:
-                books.map(
-                    (book) =>
-                        toRecommendation(
-                            book,
-                            result.sourceReason ||
-                                'Recommended based on your reading history.'
-                        )
-                )
-        };
-    }
-
-    if (
-        result.tool ===
-        'personalized_fallback_trending'
-    ) {
-        const books =
-            extractBooks(data);
-
-        if (!books.length) {
-            return {
-                message:
-                    "I couldn't find any recommendations right now.",
-                recommendations: []
-            };
-        }
-
-        return {
-            message:
-                'I could not find enough personal reading data yet, so here are some currently trending books you could try:',
-            recommendations:
-                books.map(
-                    (book) =>
-                        toRecommendation(
-                            book,
-                            'Currently trending on BUQS.'
-                        )
-                )
-        };
-    }
-
-    if (
-        result.tool ===
-        'get_trending_books'
-    ) {
-        const books =
-            extractBooks(data);
-
-        if (!books.length) {
-            return {
-                message:
-                    "I couldn't find any trending books right now.",
-                recommendations: []
-            };
-        }
-
-        return {
-            message:
-                'Here are some books that are currently trending:',
-            recommendations:
-                books.map(
-                    (book) =>
-                        toRecommendation(
-                            book,
-                            'Currently trending on BUQS.'
-                        )
-                )
+                "I'm the BUQS Librarian \u2014 I can help with books, authors, genres, ratings, trends, and your reading history. What would you like to know?",
+            recommendations: [],
+            source: 'catalog'
         };
     }
 
@@ -406,7 +123,8 @@ export const buildDeterministicResponse = ({
             return {
                 message:
                     "You haven't rated any books yet.",
-                recommendations: []
+                recommendations: [],
+                source: 'catalog'
             };
         }
 
@@ -437,7 +155,8 @@ export const buildDeterministicResponse = ({
                                 : 'You have rated this book.'
                         );
                     })
-                    .filter(Boolean)
+                    .filter(Boolean),
+            source: 'catalog'
         };
     }
 
@@ -451,8 +170,8 @@ export const buildDeterministicResponse = ({
     }
 
     if (
-        result.tool ===
-        'get_reading_history'
+        result.tool === 'get_reading_history' ||
+        result.tool === 'get_user_library'
     ) {
         const history =
             Array.isArray(data)
@@ -470,8 +189,9 @@ export const buildDeterministicResponse = ({
         if (!books.length) {
             return {
                 message:
-                    "I couldn't find any reading history.",
-                recommendations: []
+                    "I couldn't find any books in your library matching that request.",
+                recommendations: [],
+                source: 'catalog'
             };
         }
 
@@ -495,21 +215,63 @@ export const buildDeterministicResponse = ({
             return {
                 message:
                     `Your last finished book was "${lastBook.title}".`,
-                recommendations: []
+                recommendations: [],
+                source: 'catalog'
             };
         }
 
         return {
             message:
-                'Here are the latest books from your reading history:',
+                'Here are the books from your library:',
+            recommendations:
+                books.map((book) => {
+                    const rawStatus = book.status || book.user_library_status;
+                    let statusLabel = 'Library';
+                    if (rawStatus === 'reading') statusLabel = 'Currently Reading';
+                    else if (rawStatus === 'wishlist') statusLabel = 'Wishlist';
+                    else if (rawStatus === 'finished') statusLabel = 'Finished';
+
+                    return {
+                        ...toRecommendation(
+                            book,
+                            `From your library (${statusLabel}).`
+                        ),
+                        status: statusLabel,
+                        source: 'library'
+                    };
+                }),
+            source: 'catalog'
+        };
+    }
+
+    if (
+        result.tool ===
+        'get_trending_books'
+    ) {
+        const books =
+            extractBooks(data);
+
+        if (!books.length) {
+            return {
+                message:
+                    "I couldn't find any trending books right now.",
+                recommendations: [],
+                source: 'catalog'
+            };
+        }
+
+        return {
+            message:
+                'Here are some books that are currently trending:',
             recommendations:
                 books.map(
                     (book) =>
                         toRecommendation(
                             book,
-                            'From your reading history.'
+                            'Currently trending on BUQS.'
                         )
-                )
+                ),
+            source: 'catalog'
         };
     }
 
@@ -524,7 +286,8 @@ export const buildDeterministicResponse = ({
             return {
                 message:
                     "I couldn't find that book.",
-                recommendations: []
+                recommendations: [],
+                source: 'catalog'
             };
         }
 
@@ -546,103 +309,10 @@ export const buildDeterministicResponse = ({
                             : null
                     ]
                         .filter(Boolean)
-                        .join(' · ')
+                        .join(' \u00b7 ')
                 )
-            ]
-        };
-    }
-
-    if (
-        result.tool ===
-        'get_similar_books'
-    ) {
-        const books =
-            extractBooks(data);
-
-        const sourceBook =
-            result.sourceBook ||
-            context?.lastReferencedBook;
-
-        if (!books.length) {
-            return {
-                message:
-                    sourceBook
-                        ? `I couldn't find any books similar to "${sourceBook.title}" in the current catalog.`
-                        : "I couldn't find any similar books in the current catalog.",
-                recommendations: []
-            };
-        }
-
-        return {
-            message:
-                sourceBook
-                    ? `Here are ${books.length} books similar to "${sourceBook.title}" that you might enjoy:`
-                    : 'Here are some similar books you might enjoy:',
-            recommendations:
-                books.map(
-                    (book) =>
-                        toRecommendation(
-                            book,
-                            'Selected as a similar book from the BUQS catalog.'
-                        )
-                )
-        };
-    }
-
-    if (
-        result.tool ===
-        'search_books'
-    ) {
-        const books =
-            extractBooks(data);
-
-        if (!books.length) {
-            return {
-                message: result.author
-                    ? `I couldn't find any books by ${result.author} in the BUQS catalog.`
-                    : result.query
-                        ? `I couldn't find any books matching "${result.query}" in the BUQS catalog.`
-                        : "I couldn't find matching books in the BUQS catalog.",
-                recommendations: []
-            };
-        }
-
-        return {
-            message: result.author
-                ? `Here are books by ${result.author} in the BUQS catalog:`
-                : result.query
-                    ? `Here are books matching "${result.query}":`
-                    : 'Here are the matching books from the BUQS catalog:',
-            recommendations: books.map(
-                (book) =>
-                    toRecommendation(
-                        book,
-                        result.author
-                            ? `By ${book.author || result.author}.`
-                            : 'Found in the BUQS catalog.'
-                    )
-            )
-        };
-    }
-
-    if (
-        result.tool ===
-        'get_for_you_books'
-    ) {
-        const books =
-            extractBooks(data);
-
-        return {
-            message: books.length
-                ? 'Here are personalized recommendations from the BUQS catalog:'
-                : "I couldn't find personalized recommendations right now.",
-            recommendations: books.map(
-                (book) =>
-                    toRecommendation(
-                        book,
-                        'Selected for you from the BUQS catalog.'
-                    )
-            )
+            ],
+            source: 'catalog'
         };
     }
 
@@ -653,7 +323,8 @@ export const buildDeterministicResponse = ({
         return {
             message:
                 'Here is what I know about your reading profile.',
-            recommendations: []
+            recommendations: [],
+            source: 'catalog'
         };
     }
 
@@ -685,21 +356,30 @@ export const createFinalResponse =
             return {
                 message:
                     "I couldn't find enough catalog information to answer that. Try asking about a book, author, your notes, or recommendations.",
-                recommendations: []
+                recommendations: [],
+                source: 'catalog'
             };
         }
 
+        const hasAiKnowledge = results.some(
+            (r) =>
+                r.tool === 'search_general_knowledge' ||
+                r.source === 'ai_knowledge'
+        );
+
         const promptData = {
             userMessage,
-            toolResults:
-                results
+            toolResults: results.map((r) => ({
+                tool: r.tool,
+                data: compactToolResultForLlm(r.data),
+                sourceBook: r.sourceBook,
+                source: r.source
+            }))
         };
 
         try {
             const completion =
-                await groq.chat.completions.create({
-                    model:
-                        GROQ_MODEL,
+                await chatCompletion({
                     messages: [
                         {
                             role: 'system',
@@ -720,16 +400,7 @@ export const createFinalResponse =
                     max_completion_tokens:
                         FINAL_MAX_COMPLETION_TOKENS,
                     response_format: {
-                        type:
-                            'json_schema',
-                        json_schema: {
-                            name:
-                                'librarian_response',
-                            strict:
-                                true,
-                            schema:
-                                FINAL_RESPONSE_SCHEMA
-                        }
+                        type: 'json_object'
                     }
                 });
 
@@ -745,20 +416,92 @@ export const createFinalResponse =
                 );
             }
 
-            return LLMResponseSchema.parse(
-                JSON.parse(content)
-            );
+            const parsed = JSON.parse(content);
+
+            parsed.message = String(
+                parsed.message ||
+                parsed.response ||
+                parsed.text ||
+                parsed.content ||
+                'Here are some recommendations based on your request:'
+            ).trim();
+
+            parsed.source = hasAiKnowledge
+                ? 'ai_knowledge'
+                : (parsed.source || 'catalog');
+
+            parsed.notes = Array.isArray(parsed.notes) ? parsed.notes : [];
+
+            // Build lookup maps from all raw tool results to re-attach cover_image, status, etc.
+            const catalogByIsbn = new Map();
+            const catalogByTitle = new Map();
+
+            for (const r of results) {
+                const books = extractBooks(r.data);
+                for (const b of books) {
+                    if (b.isbn) catalogByIsbn.set(String(b.isbn).trim(), b);
+                    if (b.title) catalogByTitle.set(normalizeTitle(b.title), b);
+                }
+            }
+
+            const rawRecs = Array.isArray(parsed.recommendations)
+                ? parsed.recommendations
+                : (Array.isArray(parsed.books) ? parsed.books : []);
+
+            parsed.recommendations = rawRecs.map((rec) => {
+                const isbn = String(rec.isbn || 'N/A').trim();
+                const matched = catalogByIsbn.get(isbn) || catalogByTitle.get(normalizeTitle(rec.title));
+
+                const cover_image = rec.cover_image || matched?.cover_image || null;
+                const author = rec.author || matched?.author || null;
+                const rawStatus = rec.status || rec.user_library_status || matched?.status || matched?.user_library_status || null;
+
+                let statusLabel = null;
+                if (rawStatus) {
+                    const s = String(rawStatus).toLowerCase().trim();
+                    if (s === 'reading' || s === 'currently reading' || s === 'currently_reading') {
+                        statusLabel = 'Currently Reading';
+                    } else if (s === 'wishlist' || s === 'to-read') {
+                        statusLabel = 'Wishlist';
+                    } else if (s === 'finished' || s === 'read') {
+                        statusLabel = 'Finished';
+                    }
+                }
+
+                let reason = String(rec.reason || '').trim();
+                if (statusLabel) {
+                    if (!reason.toLowerCase().includes('from your library') && !reason.toLowerCase().includes('in your library')) {
+                        reason = reason ? `From your library (${statusLabel}). ${reason}` : `From your library (${statusLabel}).`;
+                    }
+                } else if (!reason) {
+                    reason = 'Recommended for you';
+                }
+
+                return {
+                    isbn: (matched?.isbn ? String(matched.isbn).trim() : isbn),
+                    title: String(rec.title || matched?.title || 'Untitled').trim(),
+                    author,
+                    cover_image,
+                    reason,
+                    bookUrl: rec.bookUrl || matched?.bookUrl || (isbn !== 'N/A' ? `/books/${encodeURIComponent(isbn)}` : '#'),
+                    noteUrl: rec.noteUrl || matched?.noteUrl || null,
+                    source: rec.source || (statusLabel ? 'library' : parsed.source),
+                    status: statusLabel
+                };
+            });
+
+            return LLMResponseSchema.parse(parsed);
         } catch (error) {
             console.error(
                 `[Librarian:${conversationId}] Final response generation failed:`,
-                error
+                error.message
             );
 
             return {
                 message:
-                    "I couldn't generate a response right now.",
-                recommendations: []
+                    "I had some trouble formatting that response, but I'm still here to help. Could you try asking again?",
+                recommendations: [],
+                source: 'catalog'
             };
         }
     };
-

@@ -3,14 +3,6 @@ import {
     saveConversationContext
 } from './memory.js';
 
-import {
-    normalizeTitle
-} from './librarian.parsers.js';
-
-import {
-    toRecommendation
-} from './librarian.book-utils.js';
-
 export const saveBookReference =
     async (
         conversationId,
@@ -63,103 +55,6 @@ export const saveBookReference =
         return updatedContext;
     };
 
-export const createDisambiguationResponse =
-    (
-        books
-    ) => {
-        if (!Array.isArray(books)) {
-            return null;
-        }
-
-        const groups =
-            new Map();
-
-        for (const book of books) {
-            if (
-                !book?.title ||
-                !book?.isbn
-            ) {
-                continue;
-            }
-
-            const key =
-                normalizeTitle(
-                    book.title
-                );
-
-            if (
-                !groups.has(key)
-            ) {
-                groups.set(
-                    key,
-                    []
-                );
-            }
-
-            groups
-                .get(key)
-                .push(book);
-        }
-
-        for (
-            const [, matches]
-                of groups
-        ) {
-            const unique =
-                Array.from(
-                    new Map(
-                        matches.map(
-                            (book) => [
-                                String(
-                                    book.isbn
-                                ),
-                                book
-                            ]
-                        )
-                    ).values()
-                );
-
-            if (
-                unique.length < 2
-            ) {
-                continue;
-            }
-
-            return {
-                message:
-                    `I found ${unique.length} books titled "${unique[0].title}". Which one do you mean?`,
-                recommendations:
-                    unique.map(
-                        (book) =>
-                            toRecommendation(
-                                book,
-                                [
-                                    book.author
-                                        ? `Author: ${book.author}`
-                                        : null,
-                                    book.published_year
-                                        ? `Published: ${book.published_year}`
-                                        : null,
-                                    Array.isArray(
-                                        book.genres
-                                    )
-                                        ? `Genres: ${book.genres.join(', ')}`
-                                        : null
-                                ]
-                                    .filter(
-                                        Boolean
-                                    )
-                                    .join(
-                                        ' · '
-                                    )
-                            )
-                    )
-            };
-        }
-
-        return null;
-    };
-
 export const saveAuthorReference =
     async (
         conversationId,
@@ -195,7 +90,10 @@ export const saveGenreRecommendationContext =
         genre,
         books
     ) => {
-        const existing =
+        const previousGenre = context?.lastGenreRecommendation?.genre;
+        const isSameGenre = previousGenre && String(previousGenre).toLowerCase() === String(genre || '').trim().toLowerCase();
+
+        const existing = isSameGenre &&
             Array.isArray(
                 context?.lastGenreRecommendation?.shownIsbns
             )

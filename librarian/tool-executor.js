@@ -1,6 +1,7 @@
 
     import {
     getUserProfile,
+    getUserLibrary,
     getReadingHistory,
     getUserRatings,
     searchBooks,
@@ -11,7 +12,8 @@
     getCatalogBooks,
     getHighestRatedGenreBooks,
     getTrendingBooks,
-    getUserNotes
+    getUserNotes,
+    searchGeneralKnowledge
 } from './tools.js';
 
 export const executeLibrarianTool =
@@ -27,10 +29,16 @@ export const executeLibrarianTool =
                     userId
                 );
 
+            case 'get_user_library':
+                return getUserLibrary(
+                    userId,
+                    args
+                );
+
             case 'get_reading_history':
                 return getReadingHistory(
                     userId,
-                    args.limit
+                    args
                 );
 
             case 'get_user_ratings':
@@ -125,6 +133,12 @@ export const executeLibrarianTool =
                     userId,
                     args.search,
                     args.limit
+                );
+
+            case 'search_general_knowledge':
+                return searchGeneralKnowledge(
+                    args.query,
+                    args.context
                 );
 
             default:

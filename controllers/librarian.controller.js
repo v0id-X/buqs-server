@@ -4,18 +4,9 @@ import {
 } from 'node:perf_hooks';
 
 import { generateLibrarianResponse } from '../librarian/librarian.service.js';
+import { isFollowUpRequest } from '../librarian/librarian.parsers.js';
 import { ChatRequestSchema } from '../librarian/schemas.js';
 import { trackEvent } from '../queues/analytics.queue.js';
-
-const isFollowUpRequest = (message) => {
-    const value = String(message || '').toLowerCase();
-
-    return /\b(?:something else|anything else|some other|show(?:\s+me)? more|more by|other by|another by)\b/.test(value) ||
-        (
-            /\b(?:highest|lowest|best|worst|rating|rated)\b/.test(value) &&
-            /\b(?:among|of)\s+(?:these|those|them|the\s+(?:last\s+)?(?:books?|results?|recommendations?))\b/.test(value)
-        );
-};
 
 const getRecommendationIsbns = (response) => [
     ...new Set(
@@ -99,9 +90,18 @@ export const askLibrarian = async (req, res) => {
                     isFollowUp &&
                     recommendationIsbns.length > 0
                         ? repeatedRecommendationCount === 0
-                        : null
+                        : null,
+                provider: librarianMetrics.provider || 'unknown',
+                model: librarianMetrics.model || 'unknown'
             }
         ).catch(console.error);
+
+        if (librarianMetrics.provider) {
+            res.setHeader('X-Served-By-Provider', librarianMetrics.provider);
+        }
+        if (librarianMetrics.model) {
+            res.setHeader('X-Served-By-Model', librarianMetrics.model);
+        }
 
         return res.status(200).json({
             success: true,
@@ -109,6 +109,14 @@ export const askLibrarian = async (req, res) => {
         });
     } catch (error) {
         console.error('[Librarian Controller] Error:', error);
+
+        if (error.name === 'CascadeExhaustionError' || error.status === 503) {
+            return res.status(503).json({
+                success: false,
+                message: 'AI service temporarily unavailable',
+                cascadeLogs: error.cascadeLogs || []
+            });
+        }
 
         return res.status(500).json({
             success: false,

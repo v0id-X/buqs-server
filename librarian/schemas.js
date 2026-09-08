@@ -44,7 +44,16 @@ export const RecommendationSchema =
 
         noteUrl:
             z.string()
+                .nullable(),
+
+        source:
+            z.enum(['catalog', 'ai_knowledge', 'library'])
+                .default('catalog'),
+
+        status:
+            z.string()
                 .nullable()
+                .optional()
     });
 
 export const NoteSchema =
@@ -74,5 +83,9 @@ export const LLMResponseSchema =
 
         notes:
             z.array(NoteSchema)
-                .default([])
+                .default([]),
+
+        source:
+            z.enum(['catalog', 'ai_knowledge', 'library'])
+                .default('catalog')
     });
