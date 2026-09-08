@@ -15,7 +15,7 @@ The backend for **BUQS**, an intelligent, personalized book discovery platform. 
 ## Highlights
 
 - **The Librarian Agent:** Conversational book assistant supporting natural language discovery, personal library inspection, reading history, notes retrieval, and contextual follow-ups (*"something else"*, *"more by this author"*).
-- **Multi-Provider LLM Gateway Cascade:** In-flight failover across **Google AI Studio (Gemini 3.5 Flash-Lite)**, **Cerebras (Qwen-3.8-27B)**, and **Groq (GPT-OSS-20B)** with automated circuit breakers and sub-1ms transition latency.
+- **Multi-Provider LLM Gateway Cascade:** In-flight failover across **Google AI Studio (Gemini 3.5 Flash-Lite)**, **Cerebras (Qwen-3.8-27B)**, and **Groq (GPT-OSS-20B)** with automated circuit breakers, custom base URL proxy overrides for cloud geo-resilience, and sub-1ms transition latency.
 - **Dual-Path Routing:** Deterministic regex routing short-circuits simple lookups (direct ISBN, notes, ratings) straight to PostgreSQL in **<1ms** (p50: 0.50ms), reducing latency by **>98%** compared to multi-second agent turns.
 - **Token Pruning & Metadata Re-Hydration:** Prunes catalog tool payloads by **87.1% – 93.5%** to respect Groq's 8k TPM limit, then re-hydrates live CDN cover images and user reading statuses from an in-memory dictionary before outputting verified JSON cards.
 - **Scoped Context & Genre Alias Expansion:** Differentiates sequential follow-ups from topic changes via `isFollowUpRequest`, resetting excluded ISBNs on new subjects and mapping colloquial genres (`dystopian` ↔ `Dystopia`, `sci-fi` ↔ `science fiction`).
@@ -144,6 +144,7 @@ A production LLM system must not fail when a single vendor experiences quota exh
 - **Priority 2 — Cerebras Cloud (`qwen-3.8-27b`):** High-speed inference engine. Instant circuit breaker trip on 402 billing errors.
 - **Priority 3 — Groq Cloud (`openai/gpt-oss-20b`):** Ultra-fast execution anchor (700–850ms).
 - **Cross-Provider Payload Sanitization:** Strips internal Google Gemini metadata (`thought_signature`, `extra_content`) before forwarding to Cerebras/Groq, eliminating `400 Bad Request` schema mismatches during in-flight failovers.
+- **Cloud Geo-Resilience & Edge Proxying:** Supports configurable `GEMINI_BASE_URL`, `CEREBRAS_BASE_URL`, and `GROQ_BASE_URL` overrides with custom `User-Agent` headers. Enables outbound calls from cloud datacenters (e.g. Azure East Asia) to route through edge reverse proxies (such as Cloudflare Workers), bypassing regional AI geo-restrictions and WAF blocks.
 
 ### 3. Token Pruning & Cover Image Re-Hydration Pipeline
 To prevent hitting Groq's strict **8,000 Tokens Per Minute (TPM)** ceiling:

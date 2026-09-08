@@ -24,8 +24,11 @@ export const PROVIDERS = [
         name: 'Gemini',
         id: 'gemini',
         client: new OpenAI({
-            baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-            apiKey: process.env.GEMINI_API_KEY
+            baseURL: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/',
+            apiKey: process.env.GEMINI_API_KEY,
+            defaultHeaders: {
+                'User-Agent': 'BUQS-Librarian-Backend/1.0'
+            }
         }),
         model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
         defaultTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 6000,
@@ -35,8 +38,11 @@ export const PROVIDERS = [
         name: 'Cerebras',
         id: 'cerebras',
         client: new OpenAI({
-            baseURL: 'https://api.cerebras.ai/v1',
-            apiKey: process.env.CEREBRAS_API_KEY
+            baseURL: process.env.CEREBRAS_BASE_URL || 'https://api.cerebras.ai/v1',
+            apiKey: process.env.CEREBRAS_API_KEY,
+            defaultHeaders: {
+                'User-Agent': 'BUQS-Librarian-Backend/1.0'
+            }
         }),
         model: process.env.CEREBRAS_MODEL || 'qwen-3.8-27b',
         defaultTimeoutMs: Number(process.env.CEREBRAS_TIMEOUT_MS) || 4000,
@@ -46,8 +52,11 @@ export const PROVIDERS = [
         name: 'Groq',
         id: 'groq',
         client: new OpenAI({
-            baseURL: 'https://api.groq.com/openai/v1',
-            apiKey: process.env.GROQ_API_KEY
+            baseURL: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+            apiKey: process.env.GROQ_API_KEY,
+            defaultHeaders: {
+                'User-Agent': 'BUQS-Librarian-Backend/1.0'
+            }
         }),
         model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
         defaultTimeoutMs: Number(process.env.GROQ_TIMEOUT_MS) || 25000,
