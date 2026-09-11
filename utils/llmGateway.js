@@ -31,7 +31,7 @@ export const PROVIDERS = [
             }
         }),
         model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
-        defaultTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 6000,
+        defaultTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 3500,
         pausedUntil: 0
     },
     {
@@ -59,7 +59,7 @@ export const PROVIDERS = [
             }
         }),
         model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
-        defaultTimeoutMs: Number(process.env.GROQ_TIMEOUT_MS) || 25000,
+        defaultTimeoutMs: Number(process.env.GROQ_TIMEOUT_MS) || 8000,
         pausedUntil: 0
     }
 ];

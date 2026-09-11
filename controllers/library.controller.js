@@ -85,13 +85,15 @@ export const getUserLibrary = async (req, res) => {
             values.push(cursorDate, cursorIsbn);
         }
 
+        const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
+
         query += ` ORDER BY ul.updated_at DESC, ul.isbn DESC LIMIT $${paramIndex}`;
-        values.push(parseInt(limit, 10));
+        values.push(parsedLimit);
 
         const library = await pool.query(query, values);
 
         let nextCursor = null;
-        if (library.rows.length === parseInt(limit, 10)) {
+        if (library.rows.length === parsedLimit) {
             const lastItem = library.rows[library.rows.length - 1];
             nextCursor = { 
                 cursorDate: lastItem.updated_at, 

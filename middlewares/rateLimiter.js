@@ -10,15 +10,19 @@ const createRedisStore = (prefix) => {
 };
 
 const customKeyGenerator = (req) => {
+    if (req.user?.id) {
+        return `user:${req.user.id}`;
+    }
+
     let ip = req.headers['x-forwarded-for'] || req.ip || '';
     
-    if (ip.includes(',')) ip = ip.split(',')[0];
+    if (ip.includes(',')) ip = ip.split(',')[0].trim();
     
     if (ip.includes(':') && ip.split(':').length === 2) {
         ip = ip.split(':')[0];
     }
     
-    return ip || req.socket.remoteAddress;
+    return `ip:${ip || req.socket.remoteAddress || 'unknown'}`;
 };
 
 const validationFlags = {

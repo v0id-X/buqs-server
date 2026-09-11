@@ -111,10 +111,16 @@ export const askLibrarian = async (req, res) => {
         console.error('[Librarian Controller] Error:', error);
 
         if (error.name === 'CascadeExhaustionError' || error.status === 503) {
+            const sanitizedLogs = (error.cascadeLogs || []).map((entry) => ({
+                provider: entry.provider,
+                status: entry.status,
+                durationMs: entry.durationMs
+            }));
+
             return res.status(503).json({
                 success: false,
                 message: 'AI service temporarily unavailable',
-                cascadeLogs: error.cascadeLogs || []
+                cascadeLogs: sanitizedLogs
             });
         }
 

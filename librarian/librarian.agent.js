@@ -116,6 +116,8 @@ export const executeAgentRequest =
         ];
 
         const collectedResults = [];
+        let lastServedProvider = null;
+        let lastServedModel = null;
 
         for (
             let round = 0;
@@ -141,6 +143,11 @@ export const executeAgentRequest =
                         parallel_tool_calls:
                             true
                     });
+
+                if (completion?._servedByProvider) {
+                    lastServedProvider = completion._servedByProvider;
+                    lastServedModel = completion._servedByModel;
+                }
             } catch (error) {
                 console.error(
                     `[Librarian:${conversationId}] LLM call failed (round ${round}):`,
@@ -159,7 +166,9 @@ export const executeAgentRequest =
                                 }
                             }
                         ],
-                        context
+                        context,
+                        provider: lastServedProvider,
+                        model: lastServedModel
                     };
                 }
 
@@ -197,7 +206,9 @@ export const executeAgentRequest =
                                 }
                             }
                         ],
-                        context
+                        context,
+                        provider: lastServedProvider,
+                        model: lastServedModel
                     };
                 }
 
@@ -435,6 +446,8 @@ export const executeAgentRequest =
         return {
             results:
                 collectedResults,
-            context
+            context,
+            provider: lastServedProvider,
+            model: lastServedModel
         };
     };

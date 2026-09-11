@@ -23,7 +23,6 @@ import {
 } from './librarian.response.js';
 
 import {
-    getLastServedTelemetry,
     CascadeExhaustionError
 } from '../utils/llmGateway.js';
 
@@ -152,6 +151,9 @@ export const generateLibrarianResponse =
                     isSafeMode
                 });
 
+            let servedProvider = 'unknown';
+            let servedModel = 'unknown';
+
             if (fastPath.handled) {
                 route = getRouteName(
                     'fast_path',
@@ -164,6 +166,9 @@ export const generateLibrarianResponse =
 
                 results =
                     fastPath.results;
+
+                servedProvider = 'FastPath:Deterministic';
+                servedModel = 'deterministic';
             } else {
                 route = 'agent';
 
@@ -189,6 +194,9 @@ export const generateLibrarianResponse =
                     'agent',
                     results
                 );
+
+                servedProvider = agent.provider || 'Gemini';
+                servedModel = agent.model || 'gemini-3.5-flash-lite';
             }
 
             const hasAiKnowledge =
@@ -218,6 +226,11 @@ export const generateLibrarianResponse =
                         results,
                         conversationId
                     );
+
+                if (finalResponse?._servedByProvider) {
+                    servedProvider = finalResponse._servedByProvider;
+                    servedModel = finalResponse._servedByModel;
+                }
             }
 
             if (hasAiKnowledge && finalResponse) {
@@ -251,15 +264,13 @@ export const generateLibrarianResponse =
                 finalResponse
             );
 
-            const telemetry = getLastServedTelemetry();
-
             return attachLibrarianMetrics(
                 finalResponse,
                 {
                     route,
                     previousShownIsbns,
-                    provider: telemetry.provider,
-                    model: telemetry.model
+                    provider: servedProvider,
+                    model: servedModel
                 }
             );
         } catch (error) {

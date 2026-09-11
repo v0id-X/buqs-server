@@ -417,6 +417,8 @@ export const createFinalResponse =
             }
 
             const parsed = JSON.parse(content);
+            parsed._servedByProvider = completion._servedByProvider;
+            parsed._servedByModel = completion._servedByModel;
 
             parsed.message = String(
                 parsed.message ||

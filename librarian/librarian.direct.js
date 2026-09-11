@@ -8,6 +8,8 @@ import {
     asksForAllRatings,
     asksForProfile,
     asksForTrending,
+    asksForLibraryStatus,
+    asksForReadingHistory,
     extractNoteSearch,
     getRequestedLimit
 } from './librarian.parsers.js';
@@ -138,6 +140,58 @@ export const executeFastPath = async ({
             results: [
                 {
                     tool: 'get_trending_books',
+                    data
+                }
+            ]
+        };
+    }
+
+    if (asksForLibraryStatus(message)) {
+        let status = null;
+        const normalized = String(message || '').toLowerCase();
+        if (/\b(?:wishlist|to-read|to_read|reading list)\b/i.test(normalized)) {
+            status = 'wishlist';
+        } else if (/\b(?:currently reading|reading)\b/i.test(normalized)) {
+            status = 'reading';
+        } else if (/\b(?:finished|completed|read)\b/i.test(normalized)) {
+            status = 'finished';
+        }
+
+        const limit = getRequestedLimit(message, 10);
+        const data = await executeLibrarianTool(
+            'get_user_library',
+            { status, limit },
+            userId,
+            isSafeMode
+        );
+
+        return {
+            handled: true,
+            context,
+            results: [
+                {
+                    tool: 'get_user_library',
+                    data
+                }
+            ]
+        };
+    }
+
+    if (asksForReadingHistory(message)) {
+        const limit = getRequestedLimit(message, 10);
+        const data = await executeLibrarianTool(
+            'get_reading_history',
+            { limit, status: 'finished' },
+            userId,
+            isSafeMode
+        );
+
+        return {
+            handled: true,
+            context,
+            results: [
+                {
+                    tool: 'get_reading_history',
                     data
                 }
             ]
